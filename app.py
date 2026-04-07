@@ -427,19 +427,46 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**💸 할인 설정**")
 
-    disc_type = st.radio(
-        "할인 유형",
-        ["일반 (과목수 자동)", "페북/구디비/종강생"],
-        index=0,
-        help="페북/구디비/종강생: 1~3과목 30%, 4과목 이상 40%",
+    # ── 메인: 수동 할인율 슬라이더 (0~100%, 5% 단위) ─────────────────────────
+    s_discount = st.slider(
+        "🎛️ 최종 할인율 (%)",
+        min_value=0, max_value=100, value=0, step=5,
+        format="%d%%",
+        help="슬라이더를 조절하면 최종 납부금액이 즉시 반영됩니다.",
     )
-    extra_disc = st.select_slider(
-        "추가 할인",
-        options=[0, 5, 10],
-        value=0,
-        format_func=lambda x: f"+{x}%",
-        help="10% 이내 자율 추가 할인 (5% 단위)",
-    )
+
+    # ── 참고: 과목수 기반 자동 계산 ──────────────────────────────────────────
+    with st.expander("💡 과목수 기준 자동 계산 참고"):
+        disc_type = st.radio(
+            "할인 유형",
+            ["일반 (과목수 자동)", "페북/구디비/종강생"],
+            index=0,
+            help="페북/구디비/종강생: 1~3과목 30%, 4과목 이상 40%",
+        )
+        extra_disc = st.select_slider(
+            "추가 할인",
+            options=[0, 5, 10],
+            value=0,
+            format_func=lambda x: f"+{x}%",
+            help="10% 이내 자율 추가 할인 (5% 단위)",
+        )
+        _n_ref = sum(
+            course_level_count(c)
+            for c in st.session_state.get("selected_courses", [])
+        )
+        if disc_type == "페북/구디비/종강생":
+            _sug = 40 if _n_ref >= 4 else 30
+        else:
+            if _n_ref <= 1:   _sug = 0
+            elif _n_ref <= 3: _sug = 10
+            elif _n_ref <= 5: _sug = 15
+            elif _n_ref <= 7: _sug = 20
+            else:             _sug = 25
+        _sug = min(_sug + extra_disc, 40)
+        st.info(f"총 **{_n_ref}단계** 기준 추천 할인율: **{_sug}%**  \n"
+                f"(위 슬라이더에 직접 입력해 적용하세요)")
+
+    # ── 추가 금액 할인 ────────────────────────────────────────────────────────
     review_on = st.checkbox("리뷰 할인 (최대 20,000원)", help="네이버·구글·카카오맵 리뷰 작성 시")
     review_won = st.number_input("리뷰 할인 금액(원)", 0, 20000, 10000, step=1000,
                                   label_visibility="collapsed") if review_on else 0
@@ -458,10 +485,6 @@ with st.sidebar:
     if st.button("🔄 수강료 데이터 새로고침", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
-
-# ── 할인율 계산 ───────────────────────────────────────────────────────────────
-# (사이드바 렌더링 후 계산 — 과목 수는 아래에서 결정되므로 col_right에서 재계산)
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 메인 화면
@@ -516,13 +539,15 @@ with st.form("ai_search_form", clear_on_submit=False):
 courses       = load_courses()
 price_map     = course_lookup(courses)
 all_courses   = [c["course"] for c in courses]
-CATEGORY_MAP  = build_category_map(courses)
-COURSE_TO_CAT = {c: cat for cat, cs in CATEGORY_MAP.items() for c in cs}
+CATEGORY_MAP    = build_category_map(courses)
+COURSE_TO_CAT   = {c: cat for cat, cs in CATEGORY_MAP.items() for c in cs}
+# AI 설계 카드 및 합계 표시용: 단가 × 레벨 수 적용된 가격맵
+total_price_map = {c: price_map[c] * course_level_count(c) for c in price_map}
 
 # ── 검색 실행 ─────────────────────────────────────────────────────────────────
 if search_btn and ai_input.strip():
     st.session_state.ai_query = ai_input.strip()
-    result = design(ai_input.strip(), price_map)
+    result = design(ai_input.strip(), total_price_map)
     st.session_state.ai_result = result
     if result is None:
         st.warning(
@@ -570,7 +595,7 @@ if ai_res:
     if show_min:
         col = card_cols[0] if (show_min and show_max) else card_cols[0]
         with col:
-            tags  = _course_tags(plan_min["courses"], price_map, dark=False)
+            tags  = _course_tags(plan_min["courses"], total_price_map, dark=False)
             rels  = _relation_html(plan_min["relations"], dark=False)
             cnt   = len(plan_min["courses"])
             st.markdown(f"""
@@ -600,7 +625,7 @@ if ai_res:
     if show_max:
         col = card_cols[1] if (show_min and show_max) else card_cols[0]
         with col:
-            tags  = _course_tags(plan_max["courses"], price_map, dark=True)
+            tags  = _course_tags(plan_max["courses"], total_price_map, dark=True)
             rels  = _relation_html(plan_max["relations"], dark=True)
             cnt   = len(plan_max["courses"])
             st.markdown(f"""
@@ -677,20 +702,11 @@ with col_left:
 
 
 with col_right:
-    # ── 할인율 계산 (단계 합산 기준) ──────────────────────────────────────
-    # 마야1~7 → 7단계, 에펙 → 1단계 등 레벨 수를 합산해 총 과목수로 인식
-    n = sum(course_level_count(c) for c in st.session_state.selected_courses)
-    if disc_type == "페북/구디비/종강생":
-        base_disc = 40 if n >= 4 else 30
-    else:
-        if n <= 1:   base_disc = 0
-        elif n <= 3: base_disc = 10
-        elif n <= 5: base_disc = 15
-        elif n <= 7: base_disc = 20
-        else:        base_disc = 25
-    s_discount = min(base_disc + extra_disc, 40)
+    # s_discount는 사이드바 슬라이더에서 직접 가져옴
+    n        = sum(course_level_count(c) for c in st.session_state.selected_courses)
+    n_titles = len(st.session_state.selected_courses)
 
-    df = build_df(st.session_state.selected_courses, price_map, s_discount)
+    df         = build_df(st.session_state.selected_courses, price_map, s_discount)
     subtotal   = int(df["_price"].sum())  if not df.empty else 0
     after_pct  = int(df["_final"].sum())  if not df.empty else 0
     fixed_disc = int(review_won) + int(ddaza_won)
@@ -699,7 +715,6 @@ with col_right:
 
     st.markdown('<div class="section-title">💰 합계</div>', unsafe_allow_html=True)
 
-    # 따즈아 할인 조건 경고
     if ddaza_on and after_pct < 1_500_000:
         st.warning("따즈아 할인은 할인 적용 후 150만원 이상 시 가능합니다.")
 
@@ -714,8 +729,7 @@ with col_right:
     </div>
     """, unsafe_allow_html=True)
 
-    n_titles = len(st.session_state.selected_courses)
-    st.metric("선택 과정 수", f"{n_titles}종 ({n}단계) → 기본할인 {base_disc}%+{extra_disc}%")
+    st.metric("선택 과정 수", f"{n_titles}종 ({n}단계)")
     st.metric("정가 합계",   fmt_won(subtotal))
     if fixed_disc:
         st.metric("% 할인 후", fmt_won(after_pct))

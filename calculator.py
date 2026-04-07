@@ -3,7 +3,27 @@ calculator.py — 수강료 계산 및 할인 로직
 """
 
 from __future__ import annotations
+import re
 from dataclasses import dataclass, field
+
+
+def course_level_count(course_name: str) -> int:
+    """
+    과정명에서 레벨(단계) 수를 추출합니다.
+    '마야1~7' → 7, '웹1~3' → 3, '에펙' → 1
+    """
+    # 틸드 범위: 마야1~7, 웹1~3, C언어1~2/주말 등
+    m = re.search(r'(\d+)~(\d+)', course_name)
+    if m:
+        start, end = int(m.group(1)), int(m.group(2))
+        return max(1, end - start + 1)
+    # 하이픈 범위: AI에이전트1-2 등 (양쪽 모두 숫자인 경우만)
+    m = re.search(r'(\d+)-(\d+)', course_name)
+    if m:
+        start, end = int(m.group(1)), int(m.group(2))
+        if end > start:
+            return end - start + 1
+    return 1
 
 
 @dataclass

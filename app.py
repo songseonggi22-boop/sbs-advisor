@@ -12,6 +12,7 @@ import streamlit as st
 
 from design_engine import design, COURSE_ROLES, FIELDS
 from excel_loader import load_courses as _excel_load_courses
+from calculator import course_level_count
 
 # ── 경로 ─────────────────────────────────────────────────────────────────────
 ROOT     = Path(__file__).parent
@@ -242,14 +243,21 @@ def fmt_won(n: int) -> str:
 def build_df(selected_names: list[str], price_map: dict[str, int], discount_rate: float) -> pd.DataFrame:
     rows = []
     for name in selected_names:
-        price = price_map.get(name, 0)
+        unit  = price_map.get(name, 0)
+        lvls  = course_level_count(name)
+        price = unit * lvls
         disc_price = round(price * (1 - discount_rate / 100))
+        level_str = f"{lvls}단계" if lvls > 1 else "1"
         rows.append({
             "과정명":   name,
+            "단가":     fmt_won(unit),
+            "단계":     level_str,
             "정가":     fmt_won(price),
             "할인율":   f"{discount_rate:.0f}%",
             "할인가":   fmt_won(disc_price),
             "절약":     fmt_won(price - disc_price),
+            "_unit":    unit,
+            "_lvls":    lvls,
             "_price":   price,
             "_final":   disc_price,
         })
@@ -271,11 +279,11 @@ def build_md(name, contact, field, consultant, memo, df, total, subtotal, saving
         f"- **연락처**: {contact}",
         f"- **희망 분야**: {field}", "",
         "## 수강료 내역", "",
-        "| 과정명 | 정가 | 할인율 | 할인가 | 절약 |",
-        "|---|---|---|---|---|",
+        "| 과정명 | 단가 | 단계 | 정가 | 할인율 | 할인가 | 절약 |",
+        "|---|---|---|---|---|---|---|",
     ]
     for _, r in df.iterrows():
-        lines.append(f"| {r['과정명']} | {r['정가']} | {r['할인율']} | {r['할인가']} | {r['절약']} |")
+        lines.append(f"| {r['과정명']} | {r['단가']} | {r['단계']} | {r['정가']} | {r['할인율']} | {r['할인가']} | {r['절약']} |")
     lines += [
         "",
         f"- **소계**: {fmt_won(subtotal)}",
@@ -300,7 +308,8 @@ def build_md(name, contact, field, consultant, memo, df, total, subtotal, saving
 
 def build_html(name, contact, field, consultant, memo, df, total, subtotal, savings, disc_rate, today) -> str:
     rows_html = "".join(
-        f"<tr><td>{r['과정명']}</td><td>{r['정가']}</td>"
+        f"<tr><td>{r['과정명']}</td><td>{r['단가']}</td><td style='text-align:center'>{r['단계']}</td>"
+        f"<td>{r['정가']}</td>"
         f"<td style='color:#e50012'>{r['할인율']}</td>"
         f"<td style='font-weight:700'>{r['할인가']}</td>"
         f"<td style='color:#16a34a'>{r['절약']}</td></tr>"
@@ -359,7 +368,7 @@ def build_html(name, contact, field, consultant, memo, df, total, subtotal, savi
 
 <h2>수강료 내역</h2>
 <table>
-  <thead><tr><th>과정명</th><th>정가</th><th>할인율</th><th>할인가</th><th>절약</th></tr></thead>
+  <thead><tr><th>과정명</th><th>단가</th><th>단계</th><th>정가</th><th>할인율</th><th>할인가</th><th>절약</th></tr></thead>
   <tbody>{rows_html}</tbody>
 </table>
 
@@ -668,8 +677,9 @@ with col_left:
 
 
 with col_right:
-    # ── 할인율 계산 (과목 수 기반) ─────────────────────────────────────────
-    n = len(st.session_state.selected_courses)
+    # ── 할인율 계산 (단계 합산 기준) ──────────────────────────────────────
+    # 마야1~7 → 7단계, 에펙 → 1단계 등 레벨 수를 합산해 총 과목수로 인식
+    n = sum(course_level_count(c) for c in st.session_state.selected_courses)
     if disc_type == "페북/구디비/종강생":
         base_disc = 40 if n >= 4 else 30
     else:
@@ -704,7 +714,8 @@ with col_right:
     </div>
     """, unsafe_allow_html=True)
 
-    st.metric("선택 과정 수", f"{n}개  →  기본할인 {base_disc}%+{extra_disc}%")
+    n_titles = len(st.session_state.selected_courses)
+    st.metric("선택 과정 수", f"{n_titles}종 ({n}단계) → 기본할인 {base_disc}%+{extra_disc}%")
     st.metric("정가 합계",   fmt_won(subtotal))
     if fixed_disc:
         st.metric("% 할인 후", fmt_won(after_pct))
@@ -719,7 +730,7 @@ st.markdown('<div class="section-title">📋 선택 과정 수강료 내역</div
 if df.empty:
     st.info("위에서 과정을 선택하면 수강료 내역이 자동으로 표시됩니다.")
 else:
-    display_df = df[["과정명","정가","할인율","할인가","절약"]].reset_index(drop=True)
+    display_df = df[["과정명","단가","단계","정가","할인율","할인가","절약"]].reset_index(drop=True)
     display_df.index += 1
     st.dataframe(
         display_df,

@@ -1111,6 +1111,7 @@ if mentor_btn and mentor_input.strip():
         with st.spinner("멘토가 생각 중입니다..."):
             try:
                 genai.configure(api_key=gemini_api_key)
+                # v1beta 명시 없이 기본 안정 버전(v1) 사용
                 model = genai.GenerativeModel(
                     model_name="gemini-1.5-flash",
                     system_instruction="너는 SBS컴퓨터아트학원의 10년 차 베테랑 커리어 멘토야.",
@@ -1118,7 +1119,20 @@ if mentor_btn and mentor_input.strip():
                 response = model.generate_content(mentor_input.strip())
                 st.session_state.mentor_answer = response.text
             except Exception as e:
-                st.session_state.mentor_answer = f"❌ 오류가 발생했습니다: {e}"
+                # 에러 발생 시 사용 가능한 모델 목록을 터미널에 출력
+                try:
+                    available = [m.name for m in genai.list_models()
+                                 if "generateContent" in m.supported_generation_methods]
+                    print("[Gemini] 사용 가능한 모델 목록:")
+                    for name in available:
+                        print(f"  {name}")
+                    model_list_str = "\n".join(available) or "(목록 없음)"
+                except Exception:
+                    model_list_str = "(목록 조회 실패)"
+                st.session_state.mentor_answer = (
+                    f"❌ 오류: {e}\n\n"
+                    f"**사용 가능한 모델 목록 (터미널 참고):**\n```\n{model_list_str}\n```"
+                )
 
 if st.session_state.mentor_answer:
     st.markdown("**🧑‍🏫 멘토의 답변**")

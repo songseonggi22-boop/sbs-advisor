@@ -1113,34 +1113,34 @@ if mentor_btn and mentor_input.strip():
                 genai.configure(api_key=gemini_api_key)
                 # v1beta 명시 없이 기본 안정 버전(v1) 사용
                 model = genai.GenerativeModel(
-                    model_name="gemini-2.0-flash",
+                    model_name="gemini-2.5-flash",
                     system_instruction="너는 SBS컴퓨터아트학원의 10년 차 베테랑 커리어 멘토야.",
                 )
                 response = model.generate_content(mentor_input.strip())
                 st.session_state.mentor_answer = response.text
             except Exception as e:
-                # 에러 발생 시 사용 가능한 모델 목록을 터미널에 출력
-                try:
-                    available = [m.name for m in genai.list_models()
-                                 if "generateContent" in m.supported_generation_methods]
-                    print("[Gemini] 사용 가능한 모델 목록:")
-                    for name in available:
-                        print(f"  {name}")
-                    model_list_str = "\n".join(available) or "(목록 없음)"
-                except Exception:
-                    model_list_str = "(목록 조회 실패)"
-                st.session_state.mentor_answer = (
-                    f"❌ 오류: {e}\n\n"
-                    f"**사용 가능한 모델 목록 (터미널 참고):**\n```\n{model_list_str}\n```"
-                )
+                err_str = str(e)
+                if "429" in err_str or "quota" in err_str.lower() or "resource" in err_str.lower():
+                    st.session_state.mentor_answer = "⏳ QUOTA_EXCEEDED"
+                else:
+                    st.session_state.mentor_answer = f"❌ 오류가 발생했습니다: {e}"
 
 if st.session_state.mentor_answer:
-    st.markdown("**🧑‍🏫 멘토의 답변**")
-    st.markdown(
-        f'<div class="mentor-answer">{st.session_state.mentor_answer}</div>',
-        unsafe_allow_html=True,
-    )
-    if st.button("✕ 답변 닫기", key="clear_mentor"):
+    if st.session_state.mentor_answer == "⏳ QUOTA_EXCEEDED":
+        st.markdown("""
+<div style="background:#fefce8;border:1.5px solid #ca8a04;border-radius:12px;
+            padding:1.2rem 1.4rem;color:#92400e;font-size:.95rem;line-height:1.7;">
+  ⏳ <b>현재 사용자가 많아 잠시 후 다시 시도해 주세요.</b><br>
+  <span style="font-size:.85rem;opacity:.8">AI 멘토링 서비스 사용량이 일시적으로 초과되었습니다. 약 1분 후 재시도해 주세요.</span>
+</div>
+""", unsafe_allow_html=True)
+    else:
+        st.markdown("**🧑‍🏫 멘토의 답변**")
+        st.markdown(
+            f'<div class="mentor-answer">{st.session_state.mentor_answer}</div>',
+            unsafe_allow_html=True,
+        )
+    if st.button("✕ 닫기", key="clear_mentor"):
         st.session_state.mentor_answer = ""
         st.rerun()
 

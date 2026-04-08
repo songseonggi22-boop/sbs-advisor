@@ -588,36 +588,43 @@ def build_excel(
     ws[cm["따즈아_count"]]  = n_courses
     ws[cm["따즈아_total"]]  = subtotal
 
-    # ── 6. 할인 섹션: 명분 + 개별 할인율 + 개별 할인금액 ──────────────────────
-    total_rate = disc_rate1 + disc_rate2 + disc_rate3  # % 단위
+    # ── 6. 할인 섹션: 명분 텍스트 + 할인율 입력 (금액은 수식으로 자동 계산) ────
+    ws[cm["명분1"]]   = disc_reason1 or "과목 수 할인"
+    ws[cm["할인율1"]] = round(disc_rate1 / 100, 4)
 
-    def _savings(rate_pct: float) -> int:
-        """rate_pct(%) 에 해당하는 개별 할인금액을 계산합니다."""
-        return round(subtotal * rate_pct / 100) if total_rate > 0 else 0
+    ws[cm["명분2"]]   = disc_reason2 or "-"
+    ws[cm["할인율2"]] = round(disc_rate2 / 100, 4)
 
-    s1 = _savings(disc_rate1)
-    s2 = _savings(disc_rate2)
-    s3 = savings - s1 - s2   # 나머지는 명분③에 귀속 (반올림 오차 흡수)
+    ws[cm["명분3"]]   = disc_reason3 or "-"
+    ws[cm["할인율3"]] = round(disc_rate3 / 100, 4)
 
-    ws[cm["명분1"]]     = disc_reason1 or "과목 수 할인"
-    ws[cm["할인율1"]]   = round(disc_rate1 / 100, 4)
-    ws[cm["할인금액1"]] = s1
+    # ── 7. 단계별 차감(Compound Discount) 수식 삽입 ──────────────────────────
+    # 엑셀에서 할인율(D열)만 바꿔도 금액이 자동 재계산됩니다.
+    F_tot  = cm["따즈아_total"]    # 원수강료 셀 (예: F11)
+    C_on   = cm["따즈아_온라인"]   # 온라인 추가금 셀 (예: C11)
+    D1, D2, D3 = cm["할인율1"], cm["할인율2"], cm["할인율3"]
+    E1, E2, E3 = cm["할인금액1"], cm["할인금액2"], cm["할인금액3"]
+    D_tot  = cm["총할인금액"]
+    D_net  = cm["납부수강료"]
+    D_reg  = cm["총등록금액"]
 
-    ws[cm["명분2"]]     = disc_reason2 or "-"
-    ws[cm["할인율2"]]   = round(disc_rate2 / 100, 4)
-    ws[cm["할인금액2"]] = s2
+    # 1차: 정가 × 할인율①
+    ws[E1] = f"={F_tot}*{D1}"
+    # 2차: 1차 결과값 × 할인율② = 정가 × (1-율①) × 율②
+    ws[E2] = f"={F_tot}*(1-{D1})*{D2}"
+    # 3차: 2차 결과값 × 할인율③ = 정가 × (1-율①) × (1-율②) × 율③
+    ws[E3] = f"={F_tot}*(1-{D1})*(1-{D2})*{D3}"
 
-    ws[cm["명분3"]]     = disc_reason3 or "-"
-    ws[cm["할인율3"]]   = round(disc_rate3 / 100, 4)
-    ws[cm["할인금액3"]] = max(s3, 0)
-
-    # ── 7. 합계 행 ───────────────────────────────────────────────────────────
-    ws[cm["총할인금액"]]   = savings
-    ws[cm["납부수강료"]]   = total
-    ws[cm["총등록금액"]]   = total
-    ws[cm["3개월할부"]]    = round(total / 3, -2)   if total else 0
-    ws[cm["6개월할부"]]    = round(total / 6, -2)   if total else 0
-    ws[cm["과목당수강료"]] = round(total / max(n_courses, 1), -2) if total else 0
+    # 총 할인금액 = ①+②+③ 합계
+    ws[D_tot] = f"=SUM({E1},{E2},{E3})"
+    # 납부 수강료 = 원수강료 − 총 할인
+    ws[D_net] = f"={F_tot}-{D_tot}"
+    # 총 등록금액 = 납부수강료 + 온라인 추가금(현재 0)
+    ws[D_reg] = f"={D_net}+{C_on}"
+    # 할부 / 과목당
+    ws[cm["3개월할부"]]    = f"=ROUND({D_net}/3,-2)"
+    ws[cm["6개월할부"]]    = f"=ROUND({D_net}/6,-2)"
+    ws[cm["과목당수강료"]] = f"=ROUND({D_net}/{n_courses},-2)"
 
     # ── 8. bytes 반환 ─────────────────────────────────────────────────────────
     buf = io.BytesIO()
@@ -692,12 +699,13 @@ with st.sidebar:
             help="명분③에 해당하는 할인율 (%)", key="dr3",
         )
 
-    # 최종 할인율 = 세 명분 할인율의 합계
-    s_discount = disc_rate1 + disc_rate2 + disc_rate3
-    if s_discount > 0:
+    # 단계별 차감(Compound Discount) 최종 할인율 자동 계산
+    _r1, _r2, _r3 = disc_rate1 / 100, disc_rate2 / 100, disc_rate3 / 100
+    s_discount = round((1 - (1 - _r1) * (1 - _r2) * (1 - _r3)) * 100, 2)
+    if disc_rate1 or disc_rate2 or disc_rate3:
         st.info(
-            f"최종 할인율: **{s_discount}%**  \n"
-            f"({disc_rate1}% + {disc_rate2}% + {disc_rate3}%)",
+            f"복합 할인율: **{s_discount:.1f}%**  \n"
+            f"({disc_rate1}% → {disc_rate2}% → {disc_rate3}% 순차 적용)",
         )
 
     # ── 참고: 과목수 기반 자동 계산 ──────────────────────────────────────────
@@ -997,7 +1005,7 @@ with col_right:
       <div class="total-label">정가 합계</div>
       <div class="total-amount">{fmt_won(subtotal)}</div>
       <div class="total-savings">
-        할인율 {s_discount}% 적용 → 최종 {fmt_won(total)}<br>
+        복합 할인율 {s_discount:.1f}% 적용 → 최종 {fmt_won(total)}<br>
         절약 {fmt_won(savings)}
       </div>
     </div>
@@ -1005,6 +1013,24 @@ with col_right:
 
     st.metric("선택 과정 수", f"{n_titles}종 ({n}단계)")
     st.metric("정가 합계",   fmt_won(subtotal))
+
+    # ── 단계별 할인 미리보기 ──────────────────────────────────────────────────
+    if subtotal > 0 and (disc_rate1 or disc_rate2 or disc_rate3):
+        _p0 = subtotal
+        _p1 = round(_p0 * (1 - disc_rate1 / 100))
+        _p2 = round(_p1 * (1 - disc_rate2 / 100))
+        _p3 = round(_p2 * (1 - disc_rate3 / 100))
+        _rows = [f"**정가** → {fmt_won(_p0)}"]
+        if disc_rate1:
+            _rows.append(f"① _{disc_reason1 or '명분①'}_ -{disc_rate1}% → **{fmt_won(_p1)}**")
+        if disc_rate2:
+            _rows.append(f"② _{disc_reason2 or '명분②'}_ -{disc_rate2}% → **{fmt_won(_p2)}**")
+        if disc_rate3:
+            _rows.append(f"③ _{disc_reason3 or '명분③'}_ -{disc_rate3}% → **{fmt_won(_p3)}**")
+        with st.expander("📊 단계별 할인 미리보기", expanded=True):
+            for _r in _rows:
+                st.markdown(_r)
+
     if fixed_disc:
         st.metric("% 할인 후", fmt_won(after_pct))
         st.metric("추가 금액 할인", f"-{fmt_won(fixed_disc)}", delta_color="inverse")

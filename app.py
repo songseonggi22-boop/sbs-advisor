@@ -1112,7 +1112,7 @@ if mentor_btn and mentor_input.strip():
             try:
                 genai.configure(api_key=gemini_api_key)
                 model = genai.GenerativeModel(
-                    model_name="gemini-1.5-flash",
+                    model_name="gemini-1.5-flash-latest",
                     system_instruction="너는 SBS컴퓨터아트학원의 10년 차 베테랑 커리어 멘토야.",
                 )
                 response = model.generate_content(mentor_input.strip())

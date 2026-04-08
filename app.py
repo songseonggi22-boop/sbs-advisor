@@ -12,10 +12,6 @@ import pandas as pd
 import streamlit as st
 import openpyxl
 import google.generativeai as genai
-from openpyxl.styles import (
-    Font, PatternFill, Alignment, Border, Side, numbers
-)
-from openpyxl.utils import get_column_letter
 
 from design_engine import design, COURSE_ROLES, FIELDS
 from excel_loader import load_courses as _excel_load_courses
@@ -402,8 +398,56 @@ def build_html(name, contact, field, consultant, memo, df, total, subtotal, savi
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 엑셀 견적서 생성
+# 엑셀 견적서 생성 (견적서_양식.xlsx 템플릿 기반 — 서식 100% 유지)
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _get_schedule(course_name: str) -> str:
+    """과정명에서 수강 일정 타입을 추론합니다."""
+    if "주말" in course_name:
+        return "주말"
+    if "방학" in course_name:
+        return "방학 특강"
+    return "평일 / 주말"
+
+
+def _copy_row_style(ws, source: int, target: int) -> None:
+    """source 행의 셀 서식(폰트·채우기·테두리·정렬·숫자형식)을 target 행에 복사합니다."""
+    from copy import copy
+    for col in range(1, ws.max_column + 1):
+        src = ws.cell(row=source, column=col)
+        tgt = ws.cell(row=target, column=col)
+        tgt.font          = copy(src.font)
+        tgt.fill          = copy(src.fill)
+        tgt.border        = copy(src.border)
+        tgt.alignment     = copy(src.alignment)
+        tgt.number_format = src.number_format
+
+
+def _fix_merged_cells(ws, insert_row: int, n_inserted: int) -> None:
+    """openpyxl insert_rows 후 자동 이동되지 않는 병합 셀을 수동으로 재조정합니다.
+    insert_row 이상에 있는 모든 병합 범위를 n_inserted만큼 아래로 밉니다."""
+    from openpyxl.utils import get_column_letter as gcl
+
+    to_remove, to_add = [], []
+    for mc in list(ws.merged_cells.ranges):
+        min_r, max_r = mc.min_row, mc.max_row
+        min_c, max_c = mc.min_col, mc.max_col
+        if min_r >= insert_row:
+            to_remove.append(str(mc))
+            to_add.append(
+                f"{gcl(min_c)}{min_r + n_inserted}:{gcl(max_c)}{max_r + n_inserted}"
+            )
+        elif max_r >= insert_row:
+            to_remove.append(str(mc))
+            to_add.append(
+                f"{gcl(min_c)}{min_r}:{gcl(max_c)}{max_r + n_inserted}"
+            )
+
+    for mc in to_remove:
+        ws.merged_cells.remove(mc)
+    for ref in to_add:
+        ws.merge_cells(ref)
+
 
 def build_excel(
     name: str, contact: str, field: str, consultant: str, memo: str,
@@ -411,173 +455,72 @@ def build_excel(
     disc_rate: float, today: str,
     disc_reason1: str = "", disc_reason2: str = "", disc_reason3: str = "",
 ) -> bytes:
-    """견적서 양식(SBS컴퓨터아트학원)으로 엑셀 파일을 생성합니다."""
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "수강료견적서"
+    """견적서_양식.xlsx 템플릿을 로드해 데이터를 기입하고 bytes로 반환합니다.
+    병합 셀·색상·폰트·테두리 등 서식을 100% 유지합니다."""
 
-    # ── 색상 / 스타일 상수 ──────────────────────────────────────────────────
-    RED      = "C00000"
-    DARK_RED = "7B0000"
-    LIGHT_RED= "FFF0F0"
-    GRAY_BG  = "F2F2F2"
-    WHITE    = "FFFFFF"
-    DARK     = "1F2937"
+    TEMPLATE = ROOT / "견적서_양식.xlsx.xlsx"
+    wb = openpyxl.load_workbook(TEMPLATE)
+    ws = wb["단과과정"]
 
-    def _fill(hex_color: str) -> PatternFill:
-        return PatternFill("solid", fgColor=hex_color)
+    n_courses     = len(df)
+    TEMPLATE_ROWS = 2   # 템플릿 기본 과정 행 수 (row 8~9)
 
-    def _font(bold=False, size=10, color="000000", name="맑은 고딕") -> Font:
-        return Font(bold=bold, size=size, color=color, name=name)
+    # ── 1. 과정이 2개 초과 시 추가 행 삽입 + 병합 셀 재조정 ──────────────────
+    if n_courses > TEMPLATE_ROWS:
+        extra = n_courses - TEMPLATE_ROWS
+        ws.insert_rows(10, extra)               # 따즈아 행(10) 앞에 삽입
+        _fix_merged_cells(ws, insert_row=10, n_inserted=extra)  # 병합 셀 수동 이동
+        for i in range(extra):
+            new_r = 10 + i
+            _copy_row_style(ws, source=8, target=new_r)
+            ws.merge_cells(f"B{new_r}:C{new_r}")
+            ws.merge_cells(f"F{new_r}:G{new_r}")
 
-    def _border(style="thin") -> Border:
-        s = Side(style=style)
-        return Border(left=s, right=s, top=s, bottom=s)
+    # ── 2. 헤더 정보 ─────────────────────────────────────────────────────────
+    ws["D5"] = today        # 상담일자 (=TODAY() 수식을 실제 값으로 대체)
+    ws["F5"] = consultant   # 상담자
+    ws["F6"] = contact      # 연락처
 
-    def _align(h="left", v="center", wrap=False) -> Alignment:
-        return Alignment(horizontal=h, vertical=v, wrap_text=wrap)
+    # ── 3. 과정 데이터 행 채우기 ─────────────────────────────────────────────
+    for i, (_, row) in enumerate(df.iterrows()):
+        r = 8 + i
+        ws[f"B{r}"] = row["과정명"]             # 과목명 (B:C 병합셀 → B에 입력)
+        ws[f"D{r}"] = 1                          # COURSE 수 (과목당 1)
+        ws[f"E{r}"] = _get_schedule(row["과정명"])  # 수강 일정
+        ws[f"F{r}"] = row["_price"]              # 수강료 정가 (F:G 병합셀 → F에 입력)
 
-    def _set(cell, value, bold=False, size=10, color="000000",
-             fill=None, align_h="left", align_v="center",
-             wrap=False, num_fmt=None):
-        cell.value = value
-        cell.font  = _font(bold=bold, size=size, color=color)
-        cell.alignment = _align(h=align_h, v=align_v, wrap=wrap)
-        if fill:
-            cell.fill = fill
-        if num_fmt:
-            cell.number_format = num_fmt
+    # ── 4. 따즈아 합산 행 ────────────────────────────────────────────────────
+    taja = 8 + n_courses
+    ws[f"C{taja}"] = 0          # 온라인 추가금 없음
+    ws[f"D{taja}"] = n_courses  # 총 과목 수 (SUM 수식 대체)
+    ws[f"F{taja}"] = subtotal   # 원수강료 합계 (SUM 수식 대체)
 
-    # ── 열 너비 설정 ────────────────────────────────────────────────────────
-    col_widths = {"A": 6, "B": 28, "C": 10, "D": 12, "E": 18, "F": 16, "G": 14}
-    for col, w in col_widths.items():
-        ws.column_dimensions[col].width = w
+    # ── 5. 할인 섹션 (삽입된 행 수만큼 오프셋 적용) ──────────────────────────
+    off = max(0, n_courses - TEMPLATE_ROWS)
+    r13, r14, r15 = 13 + off, 14 + off, 15 + off
+    r16, r17, r18 = 16 + off, 17 + off, 18 + off
+    r19, r20, r21 = 19 + off, 20 + off, 21 + off
 
-    # ── 제목 행 (1~3행 병합) ─────────────────────────────────────────────────
-    ws.merge_cells("A1:G3")
-    title_cell = ws["A1"]
-    _set(title_cell, "SBS컴퓨터아트학원  수강료 견적서",
-         bold=True, size=18, color=WHITE, fill=_fill(DARK_RED),
-         align_h="center", align_v="center")
-    ws.row_dimensions[1].height = 14
-    ws.row_dimensions[2].height = 14
-    ws.row_dimensions[3].height = 14
+    ws[f"B{r13}"] = disc_reason1 or "과목 수 할인"
+    ws[f"D{r13}"] = round(disc_rate / 100, 4)
+    ws[f"E{r13}"] = savings     # 총 할인금액 (수식 대체)
 
-    # ── 정보 행 (4~5행) ──────────────────────────────────────────────────────
-    ws.row_dimensions[4].height = 22
-    ws.row_dimensions[5].height = 22
-    _set(ws["A4"], "작성일자 : ", bold=True, size=10, fill=_fill(GRAY_BG), align_h="right")
-    ws.merge_cells("B4:C4")
-    _set(ws["B4"], today, size=10)
-    _set(ws["D4"], "담당 상담사 : ", bold=True, size=10, fill=_fill(GRAY_BG), align_h="right")
-    ws.merge_cells("E4:G4")
-    _set(ws["E4"], consultant, size=10)
+    ws[f"B{r14}"] = disc_reason2 or "-"
+    ws[f"D{r14}"] = 0
+    ws[f"E{r14}"] = 0
 
-    _set(ws["A5"], "상담생 성함 : ", bold=True, size=10, fill=_fill(GRAY_BG), align_h="right")
-    ws.merge_cells("B5:C5")
-    _set(ws["B5"], name, size=10)
-    _set(ws["D5"], "연락처 : ", bold=True, size=10, fill=_fill(GRAY_BG), align_h="right")
-    ws.merge_cells("E5:G5")
-    _set(ws["E5"], contact, size=10)
+    ws[f"B{r15}"] = disc_reason3 or "-"
+    ws[f"D{r15}"] = 0
+    ws[f"E{r15}"] = 0
 
-    # ── 과정 테이블 헤더 (6행) ────────────────────────────────────────────────
-    ws.row_dimensions[6].height = 22
-    for col_lbl, header in [("A","No."), ("B","과 정 명"), ("C","단계"),
-                             ("D","단 가"), ("E","수강 기간"), ("F","정 가"), ("G","할인가")]:
-        cell = ws[f"{col_lbl}6"]
-        _set(cell, header, bold=True, size=10, color=WHITE,
-             fill=_fill(RED), align_h="center")
-        cell.border = _border()
+    ws[f"D{r16}"] = savings                                          # 총 할인금액
+    ws[f"D{r17}"] = total                                            # 납부 수강료
+    ws[f"D{r18}"] = total                                            # 총 등록금액
+    ws[f"D{r19}"] = round(total / 3, -2)   if total else 0          # 3개월 할부
+    ws[f"D{r20}"] = round(total / 6, -2)   if total else 0          # 6개월 할부
+    ws[f"D{r21}"] = round(total / max(n_courses, 1), -2) if total else 0  # 과목당
 
-    # ── 과정 데이터 행 ────────────────────────────────────────────────────────
-    START_ROW = 7
-    for i, (_, row) in enumerate(df.iterrows(), start=1):
-        r = START_ROW + i - 1
-        ws.row_dimensions[r].height = 20
-        bg = _fill(LIGHT_RED) if i % 2 == 0 else None
-        _set(ws[f"A{r}"], i, align_h="center", fill=bg); ws[f"A{r}"].border = _border()
-        _set(ws[f"B{r}"], row["과정명"], fill=bg); ws[f"B{r}"].border = _border()
-        _set(ws[f"C{r}"], row["단계"], align_h="center", fill=bg); ws[f"C{r}"].border = _border()
-        _set(ws[f"D{r}"], row["_unit"], fill=bg, align_h="right",
-             num_fmt='#,##0"원"'); ws[f"D{r}"].border = _border()
-        _set(ws[f"E{r}"], f"{row['_lvls']}단계", align_h="center", fill=bg); ws[f"E{r}"].border = _border()
-        _set(ws[f"F{r}"], row["_price"], fill=bg, align_h="right",
-             num_fmt='#,##0"원"'); ws[f"F{r}"].border = _border()
-        _set(ws[f"G{r}"], row["_final"], fill=bg, align_h="right",
-             num_fmt='#,##0"원"'); ws[f"G{r}"].border = _border()
-
-    # ── 소계 행 ───────────────────────────────────────────────────────────────
-    SUB_ROW = START_ROW + len(df)
-    ws.row_dimensions[SUB_ROW].height = 22
-    ws.merge_cells(f"A{SUB_ROW}:E{SUB_ROW}")
-    _set(ws[f"A{SUB_ROW}"], "소  계", bold=True, size=10, color=WHITE,
-         fill=_fill(RED), align_h="center"); ws[f"A{SUB_ROW}"].border = _border()
-    _set(ws[f"F{SUB_ROW}"], subtotal, bold=True, fill=_fill(GRAY_BG),
-         align_h="right", num_fmt='#,##0"원"'); ws[f"F{SUB_ROW}"].border = _border()
-    _set(ws[f"G{SUB_ROW}"], "", fill=_fill(GRAY_BG)); ws[f"G{SUB_ROW}"].border = _border()
-
-    # ── 할인 정보 ─────────────────────────────────────────────────────────────
-    D1 = SUB_ROW + 1
-    D2 = SUB_ROW + 2
-    D3 = SUB_ROW + 3
-    D4 = SUB_ROW + 4
-    D5 = SUB_ROW + 5
-    for r in [D1, D2, D3, D4, D5]:
-        ws.row_dimensions[r].height = 20
-
-    ws.merge_cells(f"A{D1}:B{D1}")
-    _set(ws[f"A{D1}"], "할인율 적용", bold=True, size=10, color=WHITE,
-         fill=_fill(DARK_RED), align_h="center"); ws[f"A{D1}"].border = _border()
-    ws.merge_cells(f"C{D1}:E{D1}")
-    _set(ws[f"C{D1}"], f"{disc_rate:.0f}%", bold=True, size=12,
-         color=RED, align_h="center"); ws[f"C{D1}"].border = _border()
-    ws.merge_cells(f"F{D1}:G{D1}")
-    _set(ws[f"F{D1}"], f"할인 {fmt_won(savings)} 절약", bold=True,
-         fill=_fill(LIGHT_RED), align_h="center"); ws[f"F{D1}"].border = _border()
-
-    # 할인 명분
-    reasons = [r for r in [disc_reason1, disc_reason2, disc_reason3] if r.strip()]
-    ws.merge_cells(f"A{D2}:B{D2}")
-    _set(ws[f"A{D2}"], "할인 명분", bold=True, fill=_fill(GRAY_BG)); ws[f"A{D2}"].border = _border()
-    ws.merge_cells(f"C{D2}:G{D2}")
-    _set(ws[f"C{D2}"], "  /  ".join(reasons) if reasons else "(입력 없음)",
-         size=10); ws[f"C{D2}"].border = _border()
-
-    # 최종 납부금액
-    ws.merge_cells(f"A{D3}:E{D3}")
-    _set(ws[f"A{D3}"], "최종 납부금액", bold=True, size=11, color=WHITE,
-         fill=_fill(DARK_RED), align_h="center"); ws[f"A{D3}"].border = _border()
-    ws.merge_cells(f"F{D3}:G{D3}")
-    _set(ws[f"F{D3}"], total, bold=True, size=14, color=DARK_RED,
-         fill=_fill(LIGHT_RED), align_h="right",
-         num_fmt='#,##0"원"'); ws[f"F{D3}"].border = _border()
-
-    # 분납 안내
-    ws.merge_cells(f"A{D4}:B{D4}")
-    _set(ws[f"A{D4}"], "3개월 분납", bold=True, fill=_fill(GRAY_BG)); ws[f"A{D4}"].border = _border()
-    ws.merge_cells(f"C{D4}:D{D4}")
-    _set(ws[f"C{D4}"], round(total / 3, -2) if total else 0, align_h="right",
-         num_fmt='#,##0"원"'); ws[f"C{D4}"].border = _border()
-    ws.merge_cells(f"E{D4}:F{D4}")
-    _set(ws[f"E{D4}"], "6개월 분납"); ws[f"E{D4}"].border = _border()
-    _set(ws[f"G{D4}"], round(total / 6, -2) if total else 0, align_h="right",
-         num_fmt='#,##0"원"'); ws[f"G{D4}"].border = _border()
-
-    # 메모
-    ws.merge_cells(f"A{D5}:B{D5}")
-    _set(ws[f"A{D5}"], "상담 메모", bold=True, fill=_fill(GRAY_BG)); ws[f"A{D5}"].border = _border()
-    ws.merge_cells(f"C{D5}:G{D5}")
-    _set(ws[f"C{D5}"], memo.strip() or "(없음)", wrap=True); ws[f"C{D5}"].border = _border()
-    ws.row_dimensions[D5].height = max(30, min(80, 15 * (memo.count("\n") + 2)))
-
-    # ── 안내 문구 ─────────────────────────────────────────────────────────────
-    NOTICE_ROW = D5 + 2
-    ws.merge_cells(f"A{NOTICE_ROW}:G{NOTICE_ROW}")
-    _set(ws[f"A{NOTICE_ROW}"],
-         "※ 이 견적서는 SBS컴퓨터아트학원 내부용이며, 수강 계약 시 최종 금액이 확정됩니다.",
-         size=9, color="6B7280"); ws.row_dimensions[NOTICE_ROW].height = 16
-
-    # ── 바이트로 변환 ─────────────────────────────────────────────────────────
+    # ── 6. bytes 반환 ─────────────────────────────────────────────────────────
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)

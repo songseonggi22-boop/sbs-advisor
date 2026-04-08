@@ -11,6 +11,7 @@ import io
 import pandas as pd
 import streamlit as st
 import openpyxl
+import google.generativeai as genai
 from openpyxl.styles import (
     Font, PatternFill, Alignment, Border, Side, numbers
 )
@@ -597,6 +598,10 @@ if "ai_query" not in st.session_state:
     st.session_state.ai_query: str = ""
 if "ai_design_memo" not in st.session_state:
     st.session_state.ai_design_memo: str = ""
+if "mentor_query" not in st.session_state:
+    st.session_state.mentor_query: str = ""
+if "mentor_answer" not in st.session_state:
+    st.session_state.mentor_answer: str = ""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -674,6 +679,15 @@ with st.sidebar:
     _memo_default = st.session_state.get("ai_design_memo", "")
     s_memo = st.text_area("메모", value=_memo_default, height=160,
                            placeholder="수강 목표, 희망 수업 시간, 특이사항 등을 입력하세요.")
+
+    st.markdown("---")
+    st.markdown("**🤖 AI 멘토링 설정**")
+    gemini_api_key = st.text_input(
+        "Gemini API Key",
+        type="password",
+        placeholder="AIza...",
+        help="Google AI Studio에서 발급한 Gemini API Key를 입력하세요.",
+    )
 
     st.markdown("---")
     if st.button("🔄 수강료 데이터 새로고침", use_container_width=True):
@@ -1043,6 +1057,78 @@ else:
             type="primary",
         )
         st.caption("SBS컴퓨터아트학원 양식으로 저장됩니다.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AI 멘토링 어시스턴트
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.markdown("---")
+st.markdown("""
+<style>
+.mentor-wrap {
+    background:linear-gradient(135deg,#0f172a 0%,#1a1a2e 100%);
+    border-radius:16px; padding:1.5rem 1.8rem; margin-bottom:1.4rem;
+    border:1px solid #374151;
+    box-shadow:0 4px 24px rgba(0,0,0,.25);
+}
+.mentor-wrap h3 { color:#fbbf24; font-size:1rem; font-weight:800; margin:0 0 .15rem; }
+.mentor-wrap p  { color:#94a3b8; font-size:.82rem; margin:0 0 .8rem; }
+.mentor-answer {
+    background:#1e293b; border:1.5px solid #334155;
+    border-radius:12px; padding:1.2rem 1.4rem;
+    color:#e2e8f0; font-size:.9rem; line-height:1.7;
+    margin-top:.8rem; white-space:pre-wrap;
+}
+</style>
+<div class="mentor-wrap">
+  <h3>🧑‍🏫 AI 멘토링 어시스턴트</h3>
+  <p>SBS아카데미 10년 차 베테랑 커리어 멘토에게 무엇이든 물어보세요.</p>
+</div>
+""", unsafe_allow_html=True)
+
+# 추천 질문 버튼
+suggest_cols = st.columns(2)
+for col, q in zip(suggest_cols, ["비전공자 취업 준비", "에셋과 에펙의 차이"]):
+    with col:
+        if st.button(q, key=f"suggest_{q}", use_container_width=True):
+            st.session_state.mentor_query = q
+
+with st.form("mentor_form", clear_on_submit=False):
+    mentor_input = st.text_input(
+        "질문",
+        value=st.session_state.mentor_query,
+        placeholder="예: 비전공자도 그래픽 디자인 취업이 가능한가요?",
+        label_visibility="collapsed",
+    )
+    mentor_btn = st.form_submit_button("💬 멘토에게 질문하기", use_container_width=True, type="primary")
+
+if mentor_btn and mentor_input.strip():
+    st.session_state.mentor_query = mentor_input.strip()
+    if not gemini_api_key:
+        st.warning("사이드바에서 Gemini API Key를 입력해 주세요.")
+    else:
+        with st.spinner("멘토가 생각 중입니다..."):
+            try:
+                genai.configure(api_key=gemini_api_key)
+                model = genai.GenerativeModel(
+                    model_name="gemini-1.5-flash",
+                    system_instruction="너는 SBS컴퓨터아트학원의 10년 차 베테랑 커리어 멘토야.",
+                )
+                response = model.generate_content(mentor_input.strip())
+                st.session_state.mentor_answer = response.text
+            except Exception as e:
+                st.session_state.mentor_answer = f"❌ 오류가 발생했습니다: {e}"
+
+if st.session_state.mentor_answer:
+    st.markdown("**🧑‍🏫 멘토의 답변**")
+    st.markdown(
+        f'<div class="mentor-answer">{st.session_state.mentor_answer}</div>',
+        unsafe_allow_html=True,
+    )
+    if st.button("✕ 답변 닫기", key="clear_mentor"):
+        st.session_state.mentor_answer = ""
+        st.rerun()
 
 
 # ── 푸터 ──────────────────────────────────────────────────────────────────────

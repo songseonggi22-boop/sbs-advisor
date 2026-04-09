@@ -413,8 +413,9 @@ CELL_MAP: dict[str, str | int] = {
     "등록비_열":    "E",    # 수강료 입력 열
     # ── 합계 ──────────────────────────────────────────────────────────────────
     "합계셀":       "E31",  # 총 등록비 (SUM 수식)
-    # ── 할인 섹션 (35~39행 고정, C=율, D=금액, E=잔액) ───────────────────────
+    # ── 할인 섹션 (35~39행 고정, A=명분, C=율, D=금액, E=잔액) ─────────────────
     "할인_시작행":  35,
+    "명분_열":      "A",    # A35:B35 병합 → A열에 입력
     "할인율_열":    "C",
     "할인금액_열":  "D",
     "잔액_열":      "E",
@@ -438,15 +439,14 @@ def build_excel(
     name: str, contact: str, field: str, consultant: str, memo: str,
     df: "pd.DataFrame", total: int, subtotal: int, savings: int,
     disc_rate: float, today: str,
-    disc_rate1: float = 0.0,
-    disc_rate2: float = 0.0,
-    disc_rate3: float = 0.0,
-    disc_rate4: float = 0.0,
-    disc_rate5: float = 0.0,
+    disc_rate1: float = 0.0, disc_reason1: str = "",
+    disc_rate2: float = 0.0, disc_reason2: str = "",
+    disc_rate3: float = 0.0, disc_reason3: str = "",
+    disc_rate4: float = 0.0, disc_reason4: str = "",
+    disc_rate5: float = 0.0, disc_reason5: str = "",
 ) -> bytes:
     """패키지 견적서(고정).xlsx 템플릿을 로드해 CELL_MAP 기반으로 데이터를 기입합니다.
-    병합 셀·색상·폰트·테두리 등 서식을 100% 유지합니다.
-    할인 명분은 템플릿에 고정되어 있으며, 할인율(C열)만 입력합니다."""
+    병합 셀·색상·폰트·테두리 등 서식을 100% 유지합니다."""
 
     TEMPLATE = ROOT / "패키지 견적서(고정).xlsx"
     wb = openpyxl.load_workbook(TEMPLATE)
@@ -470,17 +470,26 @@ def build_excel(
     ws[cm["합계셀"]] = f"=SUM({col_fee}{start}:{col_fee}{end})"
 
     # ── 3. 단계별 차감(Compound Discount) 수식 (35~39행) ─────────────────────
-    # 템플릿에 명분 텍스트가 고정되어 있으므로 C(율)·D(금액)·E(잔액)만 기입
-    disc_rates = [disc_rate1, disc_rate2, disc_rate3, disc_rate4, disc_rate5]
+    _DEFAULT_REASONS = [
+        "8개 과목이상 수강시 패키지 할인",
+        "따따아 과정 우선 등록",
+        "첫번째 첫 결제 패키지 할인",
+        "원장 결재권한 할인",
+        "기타 할인",
+    ]
+    disc_rates   = [disc_rate1,   disc_rate2,   disc_rate3,   disc_rate4,   disc_rate5]
+    disc_reasons = [disc_reason1, disc_reason2, disc_reason3, disc_reason4, disc_reason5]
     hr      = int(cm["할인_시작행"])   # 35
+    col_a   = cm["명분_열"]             # A (A35:B35 병합 → A에 입력)
     col_c   = cm["할인율_열"]           # C
     col_d   = cm["할인금액_열"]         # D
     col_e   = cm["잔액_열"]             # E
     prev_e  = cm["합계셀"]              # E31 (첫 번째 단계의 기준)
 
-    for i, rate in enumerate(disc_rates):
+    for i, (rate, reason) in enumerate(zip(disc_rates, disc_reasons)):
         r        = hr + i   # 35, 36, 37, 38, 39
         rate_dec = round(rate / 100, 4)
+        ws[f"{col_a}{r}"] = reason or _DEFAULT_REASONS[i]
         ws[f"{col_c}{r}"] = rate_dec
         # 할인금액 = 이전 잔액 × 이 단계 할인율
         ws[f"{col_d}{r}"] = f"={prev_e}*{col_c}{r}"
@@ -539,20 +548,30 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**💸 할인 설정**")
 
-    # ── 단계별 할인율 입력 (명분은 엑셀 템플릿에 고정) ───────────────────────
-    st.markdown("**📝 단계별 할인율 (엑셀 고정 명분)**")
-    _DISC_LABELS = [
-        "① 8개과목↑ 패키지 할인",
-        "② 따따아 우선 등록",
-        "③ 첫 결제 패키지 할인",
-        "④ 원장 결재권한 할인",
-        "⑤ 기타 할인",
+    # ── 단계별 할인 명분 + 할인율 입력 ──────────────────────────────────────
+    st.markdown("**📝 단계별 할인 명분 & 할인율**")
+    _DEFAULT_DISC_REASONS = [
+        "8개 과목이상 수강시 패키지 할인",
+        "따따아 과정 우선 등록",
+        "첫번째 첫 결제 패키지 할인",
+        "원장 결재권한 할인",
+        "기타 할인",
     ]
-    _disc_rates_list = [
-        st.number_input(_lbl, min_value=0, max_value=40, value=0, step=5, key=f"dr{_i+1}")
-        for _i, _lbl in enumerate(_DISC_LABELS)
-    ]
+    _disc_rates_list   = []
+    _disc_reasons_list = []
+    for _i, _def in enumerate(_DEFAULT_DISC_REASONS):
+        _ca, _cb = st.columns([3, 1])
+        with _ca:
+            _disc_reasons_list.append(
+                st.text_input(f"명분 {['①','②','③','④','⑤'][_i]}", value=_def, key=f"dr_reason{_i+1}")
+            )
+        with _cb:
+            _disc_rates_list.append(
+                st.number_input(f"율{['①','②','③','④','⑤'][_i]} %", min_value=0, max_value=40,
+                                value=0, step=5, key=f"dr{_i+1}")
+            )
     disc_rate1, disc_rate2, disc_rate3, disc_rate4, disc_rate5 = _disc_rates_list
+    disc_reason1, disc_reason2, disc_reason3, disc_reason4, disc_reason5 = _disc_reasons_list
 
     # 단계별 차감(Compound Discount) 최종 할인율 자동 계산
     _rs = [r / 100 for r in _disc_rates_list]
@@ -934,8 +953,11 @@ else:
     excel_bytes  = build_excel(
         client_name, s_contact, s_field, s_consultant, s_memo,
         df, total, subtotal, savings, float(s_discount), today_str,
-        float(disc_rate1), float(disc_rate2), float(disc_rate3),
-        float(disc_rate4), float(disc_rate5),
+        float(disc_rate1), disc_reason1,
+        float(disc_rate2), disc_reason2,
+        float(disc_rate3), disc_reason3,
+        float(disc_rate4), disc_reason4,
+        float(disc_rate5), disc_reason5,
     )
 
     btn_col1, btn_col2, btn_col3, btn_col4 = st.columns(4)

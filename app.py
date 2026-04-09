@@ -26,6 +26,7 @@ load_dotenv()
 WP_URL          = os.getenv("WP_URL", "")
 WP_USERNAME     = os.getenv("WP_USERNAME", "")
 WP_APP_PASSWORD = os.getenv("WP_APP_PASSWORD", "")
+HF_API_KEY      = os.getenv("HF_API_KEY", "")  # Hugging Face — 이미지 생성용
 
 # ── 경로 ─────────────────────────────────────────────────────────────────────
 ROOT     = Path(__file__).parent
@@ -534,6 +535,66 @@ def extract_title(md_text: str) -> str:
     return "SBS아카데미 블로그 포스트"
 
 
+def extract_image_prompt(md_text: str) -> tuple[str, str]:
+    """[IMAGE_PROMPT]: 줄을 추출하고 나머지 정제된 텍스트를 반환합니다."""
+    lines = md_text.splitlines()
+    image_prompt = ""
+    clean_lines = []
+    for line in lines:
+        if line.strip().startswith("[IMAGE_PROMPT]:"):
+            image_prompt = line.strip()[len("[IMAGE_PROMPT]:"):].strip()
+        else:
+            clean_lines.append(line)
+    return "\n".join(clean_lines).strip(), image_prompt
+
+
+def generate_image_flux(prompt: str, hf_key: str) -> bytes:
+    """Hugging Face Inference API(FLUX.1-schnell)로 이미지를 생성합니다."""
+    url = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
+    resp = requests.post(
+        url,
+        headers={"Authorization": f"Bearer {hf_key}"},
+        json={"inputs": prompt},
+        timeout=120,
+    )
+    resp.raise_for_status()
+    return resp.content
+
+
+def upload_image_to_wp(image_bytes: bytes, filename: str) -> str:
+    """이미지를 워드프레스 미디어 라이브러리에 업로드하고 URL을 반환합니다."""
+    endpoint = f"{WP_URL.rstrip('/')}/wp-json/wp/v2/media"
+    token = base64.b64encode(
+        f"{WP_USERNAME}:{WP_APP_PASSWORD}".encode("utf-8")
+    ).decode("utf-8")
+    resp = requests.post(
+        endpoint,
+        headers={
+            "Authorization": f"Basic {token}",
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Type": "image/jpeg",
+        },
+        data=image_bytes,
+        timeout=60,
+    )
+    resp.raise_for_status()
+    return resp.json().get("source_url", "")
+
+
+def insert_image_html(html_content: str, img_url: str, alt: str) -> str:
+    """서론 첫 단락 바로 아래에 이미지 태그를 삽입합니다."""
+    img_tag = (
+        f'<figure style="text-align:center;margin:1.5rem 0;">'
+        f'<img src="{img_url}" alt="{alt}" '
+        f'style="max-width:100%;height:auto;border-radius:8px;">'
+        f'</figure>'
+    )
+    idx = html_content.find("</p>")
+    if idx != -1:
+        return html_content[:idx + 4] + "\n" + img_tag + "\n" + html_content[idx + 4:]
+    return img_tag + "\n" + html_content
+
+
 def post_to_wordpress(title: str, content: str, status: str = "publish") -> dict:
     """워드프레스 REST API로 포스트를 발행합니다. (Basic Auth + JSON)"""
     endpoint = f"{WP_URL.rstrip('/')}/wp-json/wp/v2/posts"
@@ -573,6 +634,12 @@ BLOG_DEFAULT_PROMPT = """\
 # Task
 - 구성: 제목(H1), 도입, 목차, 본문(H2/H3/H4), 표, Q&A(5개), 마무리, CTA(1개)
 - CTA는 마지막 줄에 "SBS아카데미컴퓨터학원 대전점" 문의 유도로 고정
+
+# Image Prompt
+원고 작성이 끝나면 반드시 본문 맨 마지막 줄에 아래 형식으로 이미지 프롬프트 1개를 추가한다.
+다른 내용과 반드시 한 줄 띄우고 출력한다:
+[IMAGE_PROMPT]: (글 전체 주제와 가장 잘 어울리는 photorealistic, professional quality 영어 이미지 프롬프트)
+예시: [IMAGE_PROMPT]: A professional photo of a student learning video editing at a modern computer desk, mentor explaining, bright natural light, photorealistic style
 """
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -599,6 +666,12 @@ if "blog_result" not in st.session_state:
     st.session_state.blog_result: str = ""
 if "blog_system_prompt" not in st.session_state:
     st.session_state.blog_system_prompt: str = ""  # 첫 렌더 시 BLOG_DEFAULT_PROMPT로 채움
+if "image_prompt" not in st.session_state:
+    st.session_state.image_prompt: str = ""
+if "generated_img_url" not in st.session_state:
+    st.session_state.generated_img_url: str = ""
+if "dashboard_results" not in st.session_state:
+    st.session_state.dashboard_results: list = []
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -609,7 +682,7 @@ with st.sidebar:
     st.markdown("### 🎓 SBS아카데미 대전지점")
     menu = st.radio(
         "메뉴",
-        ["📄 패키지 견적서", "✍️ 블로그 자동화"],
+        ["📄 패키지 견적서", "✍️ 블로그 자동화", "📅 예약 대시보드"],
         label_visibility="collapsed",
     )
     st.markdown("---")
@@ -711,6 +784,12 @@ with st.sidebar:
         placeholder="AIza...",
         help="Google AI Studio에서 발급한 Gemini API Key를 입력하세요.",
     )
+    hf_api_key = st.text_input(
+        "HuggingFace API Key (이미지 생성용)",
+        type="password",
+        placeholder="hf_...",
+        help="huggingface.co/settings/tokens 에서 발급. FLUX 이미지 자동 생성에 사용됩니다.",
+    )
 
     st.markdown("---")
     if st.button("🔄 수강료 데이터 새로고침", use_container_width=True):
@@ -787,7 +866,10 @@ if menu == "✍️ 블로그 자동화":
                     response = model.generate_content(
                         f"결과를 작성할 메인 키워드: {blog_keyword.strip()}"
                     )
-                    st.session_state.blog_result = response.text
+                    clean_text, img_prompt = extract_image_prompt(response.text)
+                    st.session_state.blog_result = clean_text
+                    st.session_state.image_prompt = img_prompt
+                    st.session_state.generated_img_url = ""
                 except Exception as e:
                     err_str = str(e)
                     if "429" in err_str or "quota" in err_str.lower():
@@ -803,6 +885,8 @@ if menu == "✍️ 블로그 자동화":
         with col_b:
             if st.button("✕ 원고 초기화", key="clear_blog"):
                 st.session_state.blog_result = ""
+                st.session_state.image_prompt = ""
+                st.session_state.generated_img_url = ""
                 st.rerun()
 
         st.text_area(
@@ -812,6 +896,48 @@ if menu == "✍️ 블로그 자동화":
             label_visibility="collapsed",
         )
 
+        # ── 이미지 생성 ────────────────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("**🎨 이미지 자동 생성**")
+
+        if st.session_state.image_prompt:
+            st.caption(f"AI 추천 프롬프트: `{st.session_state.image_prompt}`")
+        else:
+            st.caption("이미지 프롬프트가 없습니다. (원고 재생성 시 자동 추출됩니다)")
+
+        img_col1, img_col2 = st.columns([3, 1])
+        with img_col1:
+            custom_img_prompt = st.text_input(
+                "이미지 프롬프트 (직접 수정 가능)",
+                value=st.session_state.image_prompt,
+                key="custom_img_prompt",
+                label_visibility="collapsed",
+            )
+        with img_col2:
+            gen_img_btn = st.button("🎨 이미지 생성", use_container_width=True, key="gen_img")
+
+        if gen_img_btn:
+            if not hf_api_key:
+                st.warning("사이드바에서 HuggingFace API Key를 입력해 주세요.")
+            elif not custom_img_prompt.strip():
+                st.warning("이미지 프롬프트를 입력해 주세요.")
+            else:
+                with st.spinner("FLUX로 이미지 생성 중... (30초~2분 소요)"):
+                    try:
+                        img_bytes = generate_image_flux(custom_img_prompt.strip(), hf_api_key)
+                        safe_name = (st.session_state.blog_keyword[:20].replace(" ", "_") or "blog") + ".jpg"
+                        img_url = upload_image_to_wp(img_bytes, safe_name)
+                        st.session_state.generated_img_url = img_url
+                        st.success(f"이미지 생성 및 업로드 완료!")
+                    except requests.HTTPError as e:
+                        st.error(f"이미지 업로드 실패 (HTTP {e.response.status_code}): {e.response.text[:200]}")
+                    except Exception as e:
+                        st.error(f"이미지 생성 실패: {e}")
+
+        if st.session_state.generated_img_url:
+            st.image(st.session_state.generated_img_url, caption="생성된 이미지 미리보기", use_container_width=True)
+
+        # ── 미리보기 ───────────────────────────────────────────────────────────
         st.markdown("---")
         st.markdown("**미리보기**")
         st.markdown(st.session_state.blog_result)
@@ -819,31 +945,177 @@ if menu == "✍️ 블로그 자동화":
         # ── 워드프레스 발행 ───────────────────────────────────────────────────
         st.markdown("---")
         if WP_URL and WP_USERNAME and WP_APP_PASSWORD:
-            if st.button("🚀 워드프레스에 바로 발행하기", type="primary",
-                         use_container_width=True, key="wp_publish"):
-                with st.spinner("워드프레스에 발행 중..."):
-                    try:
-                        post_title   = extract_title(st.session_state.blog_result)
-                        html_content = md_lib.markdown(
-                            st.session_state.blog_result,
-                            extensions=["tables", "fenced_code"],
-                        )
-                        result = post_to_wordpress(post_title, html_content)
-                        post_link = result.get("link", "")
-                        st.success(
-                            f"발행 완료! 포스트 ID: {result.get('id')}  \n"
-                            f"[글 바로 보기]({post_link})"
-                        )
-                    except requests.HTTPError as e:
-                        st.error(f"발행 실패 (HTTP {e.response.status_code}): {e.response.text[:300]}")
-                    except Exception as e:
-                        st.error(f"발행 실패: {e}")
+            wp_col1, wp_col2 = st.columns(2)
+            with wp_col1:
+                if st.button("🚀 워드프레스에 바로 발행하기", type="primary",
+                             use_container_width=True, key="wp_publish"):
+                    with st.spinner("워드프레스에 발행 중..."):
+                        try:
+                            post_title   = extract_title(st.session_state.blog_result)
+                            html_content = md_lib.markdown(
+                                st.session_state.blog_result,
+                                extensions=["tables", "fenced_code"],
+                            )
+                            if st.session_state.generated_img_url:
+                                html_content = insert_image_html(
+                                    html_content,
+                                    st.session_state.generated_img_url,
+                                    st.session_state.blog_keyword,
+                                )
+                            result = post_to_wordpress(post_title, html_content, status="publish")
+                            st.success(
+                                f"발행 완료! 포스트 ID: {result.get('id')}  \n"
+                                f"[글 바로 보기]({result.get('link', '')})"
+                            )
+                        except requests.HTTPError as e:
+                            st.error(f"발행 실패 (HTTP {e.response.status_code}): {e.response.text[:300]}")
+                        except Exception as e:
+                            st.error(f"발행 실패: {e}")
+            with wp_col2:
+                if st.button("📝 임시저장(Draft)으로 올리기",
+                             use_container_width=True, key="wp_draft"):
+                    with st.spinner("임시저장 중..."):
+                        try:
+                            post_title   = extract_title(st.session_state.blog_result)
+                            html_content = md_lib.markdown(
+                                st.session_state.blog_result,
+                                extensions=["tables", "fenced_code"],
+                            )
+                            if st.session_state.generated_img_url:
+                                html_content = insert_image_html(
+                                    html_content,
+                                    st.session_state.generated_img_url,
+                                    st.session_state.blog_keyword,
+                                )
+                            result = post_to_wordpress(post_title, html_content, status="draft")
+                            st.success(
+                                f"임시저장 완료! 포스트 ID: {result.get('id')}  \n"
+                                f"[글 확인하기]({result.get('link', '')})"
+                            )
+                        except requests.HTTPError as e:
+                            st.error(f"임시저장 실패 (HTTP {e.response.status_code}): {e.response.text[:300]}")
+                        except Exception as e:
+                            st.error(f"임시저장 실패: {e}")
         else:
             st.info(
                 "`.env` 파일에 `WP_URL`, `WP_USERNAME`, `WP_APP_PASSWORD`를 설정하면 "
                 "워드프레스 발행 버튼이 활성화됩니다.",
                 icon="ℹ️",
             )
+
+    st.stop()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 예약 대시보드 탭
+# ══════════════════════════════════════════════════════════════════════════════
+
+if menu == "📅 예약 대시보드":
+    st.markdown("""
+<div style="background:linear-gradient(120deg,#1e1b4b 0%,#312e81 60%,#4338ca 100%);
+            padding:1.2rem 2rem;border-radius:14px;margin-bottom:1.4rem;
+            box-shadow:0 4px 24px rgba(67,56,202,.35);">
+  <h2 style="margin:0;color:#fff;font-size:1.4rem;font-weight:900;">글 자동 생성 및 예약 관리 대시보드</h2>
+  <p style="margin:.25rem 0 0;color:rgba(255,255,255,.80);font-size:.9rem;">
+    키워드 목록 입력 → 글 생성 → 이미지 삽입 → 워드프레스 순차 발행
+  </p>
+</div>
+""", unsafe_allow_html=True)
+
+    # ── 설정 패널 ─────────────────────────────────────────────────────────────
+    col_kw, col_opt = st.columns([3, 1])
+    with col_kw:
+        st.markdown("**키워드 목록** (한 줄에 하나씩)")
+        dash_kw_raw = st.text_area(
+            "키워드",
+            height=200,
+            placeholder="SBS아카데미 대전 영상편집 과정\nSBS아카데미 대전 포토샵 수업\n...",
+            label_visibility="collapsed",
+            key="dash_kw_input",
+        )
+    with col_opt:
+        st.markdown("**옵션**")
+        dash_include_img = st.checkbox("🎨 이미지 자동 생성", value=True, key="dash_img")
+        dash_wp_status   = st.radio("발행 상태", ["publish", "draft"],
+                                    format_func=lambda x: "즉시 발행" if x == "publish" else "임시저장",
+                                    key="dash_wp_status")
+        st.caption("이미지 생성은 HF API Key 필요")
+
+    if st.button("🚀 자동 발행 시작", type="primary", use_container_width=True, key="dash_start"):
+        dash_keywords = [k.strip() for k in dash_kw_raw.strip().splitlines() if k.strip()]
+        if not dash_keywords:
+            st.warning("키워드를 한 줄에 하나씩 입력해 주세요.")
+        elif not gemini_api_key:
+            st.warning("사이드바에서 Gemini API Key를 입력해 주세요.")
+        elif not (WP_URL and WP_USERNAME and WP_APP_PASSWORD):
+            st.warning(".env에 WordPress 정보(WP_URL, WP_USERNAME, WP_APP_PASSWORD)를 설정해 주세요.")
+        else:
+            results = []
+            progress_bar = st.progress(0, text="준비 중...")
+            status_box   = st.empty()
+            total = len(dash_keywords)
+
+            for idx, kw in enumerate(dash_keywords):
+                progress_bar.progress((idx) / total, text=f"[{idx+1}/{total}] '{kw}' 처리 중...")
+                status_box.info(f"**[{idx+1}/{total}]** '{kw}' — 원고 생성 중...")
+                row = {
+                    "키워드": kw, "제목": "", "이미지 상태": "—",
+                    "발행 상태": "", "링크": "", "오류": "",
+                }
+
+                try:
+                    # 1. 원고 생성
+                    genai.configure(api_key=gemini_api_key)
+                    model = genai.GenerativeModel(
+                        model_name="gemini-2.5-flash",
+                        system_instruction=st.session_state.blog_system_prompt or BLOG_DEFAULT_PROMPT,
+                    )
+                    response   = model.generate_content(f"결과를 작성할 메인 키워드: {kw}")
+                    clean_text, img_prompt = extract_image_prompt(response.text)
+                    row["제목"] = extract_title(clean_text)
+
+                    # 2. 이미지 생성 & 업로드
+                    img_url = ""
+                    if dash_include_img and hf_api_key and img_prompt:
+                        status_box.info(f"**[{idx+1}/{total}]** '{kw}' — 이미지 생성 중...")
+                        try:
+                            img_bytes = generate_image_flux(img_prompt, hf_api_key)
+                            safe_name = kw[:20].replace(" ", "_") + f"_{idx}.jpg"
+                            img_url   = upload_image_to_wp(img_bytes, safe_name)
+                            row["이미지 상태"] = "✅ 완료"
+                        except Exception as img_e:
+                            row["이미지 상태"] = f"❌ {str(img_e)[:40]}"
+                    elif dash_include_img and not hf_api_key:
+                        row["이미지 상태"] = "⚠️ HF Key 없음"
+
+                    # 3. HTML 변환 + 이미지 삽입 + 발행
+                    status_box.info(f"**[{idx+1}/{total}]** '{kw}' — 워드프레스 발행 중...")
+                    html_content = md_lib.markdown(clean_text, extensions=["tables", "fenced_code"])
+                    if img_url:
+                        html_content = insert_image_html(html_content, img_url, kw)
+                    wp_result = post_to_wordpress(row["제목"], html_content, status=dash_wp_status)
+                    row["발행 상태"] = "✅ 발행완료" if dash_wp_status == "publish" else "📝 임시저장"
+                    row["링크"] = wp_result.get("link", "")
+
+                except Exception as e:
+                    row["오류"] = str(e)[:80]
+                    row["발행 상태"] = "❌ 실패"
+
+                results.append(row)
+                progress_bar.progress((idx + 1) / total, text=f"[{idx+1}/{total}] 완료")
+
+            st.session_state.dashboard_results = results
+            status_box.success(f"모든 작업 완료! 총 {total}개 키워드 처리")
+
+    # ── 결과 테이블 ───────────────────────────────────────────────────────────
+    if st.session_state.dashboard_results:
+        st.markdown("---")
+        st.markdown("**발행 결과**")
+        df_dash = pd.DataFrame(st.session_state.dashboard_results)
+        st.dataframe(df_dash, use_container_width=True, height=min(38 * (len(df_dash) + 2) + 10, 500))
+        if st.button("🗑️ 결과 초기화", key="clear_dash"):
+            st.session_state.dashboard_results = []
+            st.rerun()
 
     st.stop()
 

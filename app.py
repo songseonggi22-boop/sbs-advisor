@@ -10,6 +10,7 @@ import io
 import base64
 import json
 import os
+import re
 import threading
 import time
 
@@ -602,6 +603,44 @@ def insert_image_html(html_content: str, img_url: str, alt: str) -> str:
     return insert_pexels_image_html(html_content, {"url": img_url}, alt)
 
 
+def fix_heading_levels(html: str) -> str:
+    """본문 HTML의 h1→h2, h2→h3, h3→h4 로 계층을 내립니다.
+    WP 글 제목이 자동으로 <h1>이 되므로 본문에서 h1을 제거합니다."""
+    for old, new in [(3, 4), (2, 3), (1, 2)]:   # 역순으로 처리해야 이중 치환 방지
+        html = re.sub(
+            rf'<h{old}(\s[^>]*)?>',
+            lambda m, n=new: f'<h{n}{m.group(1) or ""}>',
+            html, flags=re.IGNORECASE,
+        )
+        html = re.sub(rf'</h{old}>', f'</h{new}>', html, flags=re.IGNORECASE)
+    return html
+
+
+def upload_pexels_to_wp_media(img_info: dict, alt: str) -> int:
+    """Pexels 이미지를 다운로드해 WP 미디어 라이브러리에 업로드하고 attachment_id를 반환합니다."""
+    url = img_info.get("url", "")
+    if not url:
+        return 0
+    img_bytes = requests.get(url, timeout=30).content
+    endpoint  = f"{WP_URL.rstrip('/')}/wp-json/wp/v2/media"
+    token     = base64.b64encode(
+        f"{WP_USERNAME}:{WP_APP_PASSWORD}".encode("utf-8")
+    ).decode("utf-8")
+    filename  = re.sub(r"[^a-zA-Z0-9_-]", "_", alt[:30]) + ".jpg"
+    resp = requests.post(
+        endpoint,
+        headers={
+            "Authorization": f"Basic {token}",
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Type": "image/jpeg",
+        },
+        data=img_bytes,
+        timeout=60,
+    )
+    resp.raise_for_status()
+    return int(resp.json().get("id", 0))
+
+
 # ── 큐 영속성 ──────────────────────────────────────────────────────────────────
 
 def load_queue() -> list:
@@ -625,7 +664,7 @@ _BG_STATE: dict = {"running": False, "stop": False, "thread": None}
 
 
 def _bg_worker(interval_secs: int, gemini_key: str, pexels_key: str,
-               wp_status: str, include_img: bool) -> None:
+               wp_status: str, include_img: bool, set_as_featured: bool = True) -> None:
     """백그라운드 스레드: 큐에서 키워드를 순서대로 꺼내 발행합니다."""
     _BG_STATE["running"] = True
     _BG_STATE["stop"]    = False
@@ -660,11 +699,21 @@ def _bg_worker(interval_secs: int, gemini_key: str, pexels_key: str,
                         img_status = "✅ 완료" if img_info else "⚠️ 결과없음"
                     except Exception:
                         img_status = "❌ 실패"
-                # 3. HTML + 발행
-                html = md_lib.markdown(clean_text, extensions=["tables", "fenced_code"])
+                # 3. HTML 변환 + 헤딩 보정
+                html    = md_lib.markdown(clean_text, extensions=["tables", "fenced_code"])
+                html    = fix_heading_levels(html)
+                feat_id = 0
                 if img_info.get("url"):
-                    html = insert_pexels_image_html(html, img_info, kw)
-                wp_result = post_to_wordpress(title, html, status=wp_status)
+                    if set_as_featured:
+                        try:
+                            feat_id = upload_pexels_to_wp_media(img_info, kw)
+                        except Exception:
+                            # 대표 이미지 업로드 실패 시 본문 삽입으로 fallback
+                            html = insert_pexels_image_html(html, img_info, kw)
+                    else:
+                        html = insert_pexels_image_html(html, img_info, kw)
+                wp_result = post_to_wordpress(title, html, status=wp_status,
+                                              featured_media_id=feat_id)
                 queue = load_queue()
                 queue[idx].update({
                     "status":       "done",
@@ -687,7 +736,8 @@ def _bg_worker(interval_secs: int, gemini_key: str, pexels_key: str,
         _BG_STATE["running"] = False
 
 
-def post_to_wordpress(title: str, content: str, status: str = "publish") -> dict:
+def post_to_wordpress(title: str, content: str, status: str = "publish",
+                      featured_media_id: int = 0) -> dict:
     """워드프레스 REST API로 포스트를 발행합니다. (Basic Auth + JSON)"""
     endpoint = f"{WP_URL.rstrip('/')}/wp-json/wp/v2/posts"
     token = base64.b64encode(
@@ -697,10 +747,13 @@ def post_to_wordpress(title: str, content: str, status: str = "publish") -> dict
         "Authorization": f"Basic {token}",
         "Content-Type": "application/json",
     }
+    payload: dict = {"title": title, "content": content, "status": status}
+    if featured_media_id:
+        payload["featured_media"] = featured_media_id
     resp = requests.post(
         endpoint,
         headers=headers,
-        json={"title": title, "content": content, "status": status},
+        json=payload,
         timeout=30,
     )
     resp.raise_for_status()
@@ -726,6 +779,7 @@ BLOG_DEFAULT_PROMPT = """\
 # Task
 - 구성: 제목(H1), 도입, 목차, 본문(H2/H3/H4), 표, Q&A(5개), 마무리, CTA(1개)
 - CTA는 마지막 줄에 "SBS아카데미컴퓨터학원 대전점" 문의 유도로 고정
+- 본문 소제목은 반드시 H2부터 시작한다. 본문 내에서 H1은 절대 사용하지 않는다.
 
 # Image Keyword
 원고 작성이 끝나면 반드시 본문 맨 마지막 줄에 아래 형식으로 Pexels 이미지 검색 키워드 1개를 추가한다.
@@ -1045,24 +1099,45 @@ if menu == "✍️ 블로그 자동화":
         # ── 워드프레스 발행 ───────────────────────────────────────────────────
         st.markdown("---")
         if WP_URL and WP_USERNAME and WP_APP_PASSWORD:
+            set_featured = st.checkbox(
+                "대표 이미지(Featured Image)로 등록 — 본문 상단에 이미지를 중복 삽입하지 않음",
+                value=True,
+                key="wp_set_featured",
+                disabled=not bool(st.session_state.pexels_img_info.get("url")),
+            )
+
+            def _build_html_for_wp(wp_status: str) -> tuple[str, str, int]:
+                """(post_title, html_content, featured_media_id) 반환"""
+                post_title   = extract_title(st.session_state.blog_result)
+                html_content = md_lib.markdown(
+                    st.session_state.blog_result,
+                    extensions=["tables", "fenced_code"],
+                )
+                html_content = fix_heading_levels(html_content)
+                feat_id = 0
+                img_info = st.session_state.pexels_img_info
+                if img_info.get("url"):
+                    if set_featured:
+                        # 이미지를 대표 이미지로만 등록 — 본문 삽입 생략
+                        feat_id = upload_pexels_to_wp_media(img_info, st.session_state.blog_keyword)
+                    else:
+                        # 기존 방식: 본문 상단에 삽입
+                        html_content = insert_pexels_image_html(
+                            html_content, img_info, st.session_state.blog_keyword,
+                        )
+                return post_title, html_content, feat_id
+
             wp_col1, wp_col2 = st.columns(2)
             with wp_col1:
                 if st.button("🚀 워드프레스에 바로 발행하기", type="primary",
                              use_container_width=True, key="wp_publish"):
                     with st.spinner("워드프레스에 발행 중..."):
                         try:
-                            post_title   = extract_title(st.session_state.blog_result)
-                            html_content = md_lib.markdown(
-                                st.session_state.blog_result,
-                                extensions=["tables", "fenced_code"],
+                            post_title, html_content, feat_id = _build_html_for_wp("publish")
+                            result = post_to_wordpress(
+                                post_title, html_content,
+                                status="publish", featured_media_id=feat_id,
                             )
-                            if st.session_state.pexels_img_info.get("url"):
-                                html_content = insert_pexels_image_html(
-                                    html_content,
-                                    st.session_state.pexels_img_info,
-                                    st.session_state.blog_keyword,
-                                )
-                            result = post_to_wordpress(post_title, html_content, status="publish")
                             st.success(
                                 f"발행 완료! 포스트 ID: {result.get('id')}  \n"
                                 f"[글 바로 보기]({result.get('link', '')})"
@@ -1076,18 +1151,11 @@ if menu == "✍️ 블로그 자동화":
                              use_container_width=True, key="wp_draft"):
                     with st.spinner("임시저장 중..."):
                         try:
-                            post_title   = extract_title(st.session_state.blog_result)
-                            html_content = md_lib.markdown(
-                                st.session_state.blog_result,
-                                extensions=["tables", "fenced_code"],
+                            post_title, html_content, feat_id = _build_html_for_wp("draft")
+                            result = post_to_wordpress(
+                                post_title, html_content,
+                                status="draft", featured_media_id=feat_id,
                             )
-                            if st.session_state.pexels_img_info.get("url"):
-                                html_content = insert_pexels_image_html(
-                                    html_content,
-                                    st.session_state.pexels_img_info,
-                                    st.session_state.blog_keyword,
-                                )
-                            result = post_to_wordpress(post_title, html_content, status="draft")
                             st.success(
                                 f"임시저장 완료! 포스트 ID: {result.get('id')}  \n"
                                 f"[글 확인하기]({result.get('link', '')})"
@@ -1197,7 +1265,7 @@ if menu == "📅 예약 대시보드":
     # ── 발행 설정 ─────────────────────────────────────────────────────────────
     st.markdown("---")
     st.markdown("#### 발행 설정")
-    opt_c1, opt_c2, opt_c3 = st.columns(3)
+    opt_c1, opt_c2, opt_c3, opt_c4 = st.columns(4)
     with opt_c1:
         interval_min = st.slider(
             "발행 간격", min_value=30, max_value=360, value=60, step=30,
@@ -1207,6 +1275,14 @@ if menu == "📅 예약 대시보드":
     with opt_c2:
         dash_include_img = st.checkbox("📷 Pexels 이미지 자동 삽입", value=True, key="dash_img")
     with opt_c3:
+        dash_set_featured = st.checkbox(
+            "🖼️ 대표 이미지로 등록",
+            value=True,
+            key="dash_featured",
+            help="이미지를 본문에 삽입하지 않고 Featured Image로만 등록",
+            disabled=not st.session_state.get("dash_img", True),
+        )
+    with opt_c4:
         dash_wp_status = st.radio(
             "발행 상태", ["publish", "draft"],
             format_func=lambda x: "즉시 발행" if x == "publish" else "임시저장",
@@ -1229,7 +1305,8 @@ if menu == "📅 예약 대시보드":
                 t = threading.Thread(
                     target=_bg_worker,
                     args=(interval_min * 60, gemini_api_key,
-                          pexels_api_key, dash_wp_status, dash_include_img),
+                          pexels_api_key, dash_wp_status,
+                          dash_include_img, dash_set_featured),
                     daemon=True,
                 )
                 _BG_STATE["thread"] = t

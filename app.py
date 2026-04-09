@@ -937,10 +937,12 @@ if "generated_img_url" not in st.session_state:
 if "dashboard_results" not in st.session_state:
     st.session_state.dashboard_results: list = []
 if "wp_drafts" not in st.session_state:
-    # 원고 선생성 목록
-    # 각 항목: {keyword, title, content_html, img_info, img_keyword,
-    #           status: "pending"|"sent"|"failed", wp_link, error}
     st.session_state.wp_drafts: list = []
+    # 각 항목: {keyword, title, content_html, img_info, img_keyword,
+    #           set_featured, status:"pending"|"sent"|"failed",
+    #           wp_link, edit_link, error}
+if "gen_log" not in st.session_state:
+    st.session_state.gen_log: list = []   # 터미널 로그 (HTML 문자열)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1325,77 +1327,141 @@ if menu == "✍️ 블로그 자동화":
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 예약 대시보드 탭 — 워드프레스 네이티브 예약 발행
+# 예약 대시보드 탭 — 워드프레스 네이티브 예약 발행 (Professional UI)
 # ══════════════════════════════════════════════════════════════════════════════
 
 if menu == "📅 예약 대시보드":
     st.markdown("""
-<div style="background:linear-gradient(120deg,#1e1b4b 0%,#312e81 60%,#4338ca 100%);
-            padding:1.2rem 2rem;border-radius:14px;margin-bottom:1.4rem;
-            box-shadow:0 4px 24px rgba(67,56,202,.35);">
-  <h2 style="margin:0;color:#fff;font-size:1.4rem;font-weight:900;">워드프레스 예약 발행 시스템</h2>
-  <p style="margin:.25rem 0 0;color:rgba(255,255,255,.80);font-size:.9rem;">
+<div style="background:linear-gradient(120deg,#0f172a 0%,#1e1b4b 50%,#312e81 100%);
+            padding:1.3rem 2rem;border-radius:14px;margin-bottom:.8rem;
+            box-shadow:0 4px 24px rgba(67,56,202,.40);">
+  <h2 style="margin:0;color:#fff;font-size:1.45rem;font-weight:900;letter-spacing:-.3px">
+    워드프레스 예약 발행 시스템</h2>
+  <p style="margin:.3rem 0 0;color:rgba(200,200,255,.80);font-size:.88rem">
     키워드 입력 → 원고 선생성 → 예약 시간 설정 → 워드프레스 '예약됨'으로 전송
   </p>
 </div>
 """, unsafe_allow_html=True)
 
-    # ════════════════════════════════════════════════════════════════
-    # 상단: 키워드 입력 + 생성 옵션
-    # ════════════════════════════════════════════════════════════════
     import datetime as _dt
 
+    # ── 터미널 로그 헬퍼 ──────────────────────────────────────────────
+    def _log(level: str, msg: str) -> None:
+        ts = datetime.now().strftime("%H:%M:%S")
+        _clr = {"INFO": "#60a5fa", "OK": "#34d399",
+                 "WARN": "#fbbf24", "ERR": "#f87171", "WAIT": "#a78bfa"}
+        c = _clr.get(level, "#9ca3af")
+        tag = level.center(4)
+        st.session_state.gen_log = (
+            [f"<span style='color:#6b7280'>{ts}</span> "
+             f"<span style='color:{c};font-weight:700'>[{tag}]</span> "
+             f"<span style='color:#e5e7eb'>{msg}</span>"]
+            + st.session_state.gen_log
+        )[:300]
+
+    # ── STATUS CARDS ──────────────────────────────────────────────────
+    drafts    = st.session_state.wp_drafts
+    n_pending = sum(1 for d in drafts if d["status"] == "pending")
+    n_sent    = sum(1 for d in drafts if d["status"] == "sent")
+    n_failed  = sum(1 for d in drafts if d["status"] == "failed")
+    n_total   = len(drafts)
+
+    st.markdown(f"""
+<div style="display:flex;gap:.7rem;margin:.4rem 0 1.2rem">
+  <div style="flex:1;background:#1e1b4b;border:1.5px solid #4338ca;
+              border-radius:12px;padding:.9rem;text-align:center">
+    <div style="font-size:2rem;font-weight:900;color:#818cf8;line-height:1.1">{n_total}</div>
+    <div style="color:#c7d2fe;font-size:.78rem;margin-top:.2rem">전체 원고</div>
+  </div>
+  <div style="flex:1;background:#1a2e1a;border:1.5px solid #16a34a;
+              border-radius:12px;padding:.9rem;text-align:center">
+    <div style="font-size:2rem;font-weight:900;color:#34d399;line-height:1.1">{n_pending}</div>
+    <div style="color:#a7f3d0;font-size:.78rem;margin-top:.2rem">대기 중</div>
+  </div>
+  <div style="flex:1;background:#0f2718;border:1.5px solid #15803d;
+              border-radius:12px;padding:.9rem;text-align:center">
+    <div style="font-size:2rem;font-weight:900;color:#4ade80;line-height:1.1">{n_sent}</div>
+    <div style="color:#bbf7d0;font-size:.78rem;margin-top:.2rem">발행 성공</div>
+  </div>
+  <div style="flex:1;background:#2d1515;border:1.5px solid #dc2626;
+              border-radius:12px;padding:.9rem;text-align:center">
+    <div style="font-size:2rem;font-weight:900;color:#f87171;line-height:1.1">{n_failed}</div>
+    <div style="color:#fca5a5;font-size:.78rem;margin-top:.2rem">실패</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+    # ── 입력 + 옵션 ───────────────────────────────────────────────────
     top_left, top_right = st.columns([3, 2], gap="large")
     with top_left:
-        st.markdown("#### 키워드 입력")
+        st.markdown("**키워드 입력** (한 줄에 하나씩)")
         kw_input = st.text_area(
-            "키워드 목록 (한 줄에 하나씩)",
-            height=140,
+            "키워드",
+            height=130,
             placeholder="SBS아카데미 대전 포토샵 수업\nSBS아카데미 대전 영상편집 취업\n...",
             key="dash_kw_input",
+            label_visibility="collapsed",
         )
+        st.markdown("**글 생성 간격 설정 (분)**")
+        gen_interval_min = st.slider(
+            "간격",
+            min_value=1, max_value=100, value=5, step=1,
+            key="gen_interval_min",
+            label_visibility="collapsed",
+            help="키워드 간 대기 시간. 429 에러 방지에 활용됩니다.",
+        )
+        _kw_lines  = [k.strip() for k in kw_input.splitlines() if k.strip()]
+        _new_count = sum(1 for k in _kw_lines
+                         if k not in {d["keyword"] for d in drafts})
+        if _new_count > 1:
+            _est = _dt.datetime.now() + _dt.timedelta(
+                minutes=gen_interval_min * (_new_count - 1)
+            )
+            _td = "오늘" if _est.date() == _dt.date.today() else _est.strftime("%m/%d")
+            st.caption(
+                f"생성 예상 종료: **{_td} {_est.strftime('%H:%M')}** "
+                f"({_new_count}개 × {gen_interval_min}분)"
+            )
 
     with top_right:
-        st.markdown("#### 원고 생성 옵션")
-        gen_include_img = st.checkbox("📷 Pexels 이미지 자동 검색", value=True, key="gen_img")
+        st.markdown("**원고 생성 옵션**")
+        gen_include_img  = st.checkbox("📷 Pexels 이미지 자동 검색", value=True, key="gen_img")
         gen_set_featured = st.checkbox(
             "🖼️ 대표 이미지(Featured Image)로 등록",
             value=True, key="gen_featured",
             disabled=not st.session_state.get("gen_img", True),
         )
-        st.markdown("---")
-        st.markdown("**글 생성 간격 설정**")
-        gen_interval_min = st.slider(
-            "키워드 간 생성 간격 (분)",
-            min_value=1, max_value=100, value=5, step=1,
-            key="gen_interval_min",
-            help="각 키워드 원고 생성 사이의 대기 시간. Gemini API 할당량 초과 방지에도 활용됩니다.",
-        )
-        # 예상 종료 시간 계산
-        _kw_count = len([k for k in st.session_state.get("dash_kw_input", "").splitlines() if k.strip()])
-        _pending_count = sum(1 for d in st.session_state.wp_drafts if d["status"] == "pending")
-        _gen_target = max(_kw_count, _pending_count)
-        if _gen_target > 1:
-            _est_finish = _dt.datetime.now() + _dt.timedelta(minutes=gen_interval_min * (_gen_target - 1))
-            st.info(f"예상 종료 시간: **{_est_finish.strftime('%m/%d %H:%M')}**  \n"
-                    f"({_gen_target}개 × {gen_interval_min}분 간격)")
+        if n_sent > 0:
+            st.markdown(
+                f"<div style='background:#14532d;border-radius:8px;padding:.7rem 1rem;"
+                f"color:#bbf7d0;font-size:.88rem;margin-top:.8rem'>"
+                f"✅ 워드프레스 발행 성공: <b>{n_sent}개</b></div>",
+                unsafe_allow_html=True,
+            )
 
-    gen_btn, clear_btn = st.columns([2, 1])
-    with gen_btn:
+    # ── 생성/초기화 버튼 ─────────────────────────────────────────────
+    gc1, gc2 = st.columns([3, 1])
+    with gc1:
         do_generate = st.button(
             "✍️ 원고 일괄 생성",
             type="primary", use_container_width=True, key="gen_all",
             disabled=not gemini_api_key,
         )
-    with clear_btn:
+    with gc2:
         if st.button("🗑️ 목록 초기화", use_container_width=True, key="clear_drafts"):
             st.session_state.wp_drafts = []
+            st.session_state.gen_log   = []
+            for _ci in range(60):
+                st.session_state.pop(f"sched_date_{_ci}", None)
+                st.session_state.pop(f"sched_time_{_ci}", None)
             st.rerun()
 
     if not gemini_api_key:
         st.warning("사이드바에서 Gemini API Key를 먼저 입력해 주세요.")
 
-    # ── 원고 일괄 생성 ────────────────────────────────────────────────
+    # ════════════════════════════════════════════════════════════════
+    # 원고 일괄 생성 로직
+    # ════════════════════════════════════════════════════════════════
     if do_generate:
         kws = [k.strip() for k in kw_input.strip().splitlines() if k.strip()]
         if not kws:
@@ -1509,247 +1575,382 @@ if menu == "📅 예약 대시보드":
                 st.rerun()
 
     # ════════════════════════════════════════════════════════════════
-    # 발행 대기 목록 + 예약 시간 설정
+    # 일괄 시간 자동 배정 + 발행 대기 목록
     # ════════════════════════════════════════════════════════════════
-    drafts = st.session_state.wp_drafts
+    # drafts 는 이미 블록 상단에서 정의됨
     if not drafts:
         st.info("위에서 키워드를 입력하고 '원고 일괄 생성'을 눌러 주세요.")
         st.stop()
 
     st.markdown("---")
+
+    # ── 일괄 시간 자동 배정 (눈에 띄는 배치) ─────────────────────────
+    st.markdown("""
+<div style="background:linear-gradient(90deg,#1e1b4b,#312e81);
+            border:1.5px solid #6366f1;border-radius:10px;
+            padding:.75rem 1.2rem;margin-bottom:.6rem">
+  <span style="color:#a5b4fc;font-size:.95rem;font-weight:700">
+    ⏰ 일괄 시간 자동 배정
+  </span>
+  <span style="color:#e0e7ff;font-size:.82rem;margin-left:.5rem">
+    현재 시간 기준 · 설정한 분 간격으로 예약 시간 자동 세팅
+  </span>
+</div>
+""", unsafe_allow_html=True)
+    _ba1, _ba2, _ba3, _ba4, _ba5 = st.columns([2, 2, 2, 2, 1])
+    with _ba1:
+        bulk_start_date = st.date_input(
+            "시작 날짜", value=_dt.date.today(), key="bulk_start_date"
+        )
+    with _ba2:
+        _def_bt = (_dt.datetime.now() + _dt.timedelta(minutes=gen_interval_min)).replace(
+            second=0, microsecond=0
+        ).time()
+        bulk_start_time = st.time_input(
+            "시작 시간", value=_def_bt, step=60, key="bulk_start_time"
+        )
+    with _ba3:
+        bulk_interval_min = st.number_input(
+            "발행 간격 (분)", min_value=1, max_value=1440,
+            value=gen_interval_min, step=1, key="bulk_interval_min",
+        )
+    with _ba4:
+        _n_pend = sum(1 for d in drafts if d["status"] == "pending")
+        if _n_pend > 1:
+            _end_dt = (
+                _dt.datetime.combine(bulk_start_date, bulk_start_time)
+                + _dt.timedelta(minutes=bulk_interval_min * (_n_pend - 1))
+            )
+            _td_ = "오늘" if _end_dt.date() == _dt.date.today() else _end_dt.strftime("%m/%d")
+            st.markdown(
+                f"<div style='padding:.45rem;background:#1e1b4b;border-radius:8px;"
+                f"text-align:center;margin-top:1.8rem'>"
+                f"<span style='color:#a5b4fc;font-size:.75rem'>예상 종료</span><br>"
+                f"<b style='color:#fff'>{_td_} {_end_dt.strftime('%H:%M')}</b></div>",
+                unsafe_allow_html=True,
+            )
+    with _ba5:
+        st.markdown("<div style='height:1.9rem'></div>", unsafe_allow_html=True)
+        if st.button("자동 배정", use_container_width=True,
+                     key="bulk_assign", type="primary"):
+            _start_dt2 = _dt.datetime.combine(bulk_start_date, bulk_start_time)
+            _pi2 = 0
+            for _bi2, _d2 in enumerate(drafts):
+                if _d2["status"] == "pending":
+                    _asgn2 = _start_dt2 + _dt.timedelta(minutes=bulk_interval_min * _pi2)
+                    st.session_state[f"sched_date_{_bi2}"] = _asgn2.date()
+                    st.session_state[f"sched_time_{_bi2}"] = _asgn2.time()
+                    _pi2 += 1
+            st.rerun()
+
+    # ── 발행 대기 목록 ────────────────────────────────────────────────
+    st.markdown("---")
     st.markdown("#### 발행 대기 목록")
 
-    # ── 일괄 시간 설정 ────────────────────────────────────────────────
-    with st.expander("⏰ 일괄 시간 자동 배정", expanded=True):
-        bc1, bc2, bc3, bc4 = st.columns([2, 2, 2, 1])
-        with bc1:
-            bulk_start_date = st.date_input(
-                "시작 날짜",
-                value=_dt.date.today(),
-                key="bulk_start_date",
-            )
-        with bc2:
-            bulk_start_time = st.time_input(
-                "시작 시간",
-                value=(_dt.datetime.now() + _dt.timedelta(minutes=gen_interval_min)).replace(
-                    second=0, microsecond=0
-                ).time(),
-                step=60,
-                key="bulk_start_time",
-            )
-        with bc3:
-            bulk_interval_min = st.number_input(
-                "예약 간격 (분)",
-                min_value=1, max_value=1440, value=gen_interval_min, step=1,
-                key="bulk_interval_min",
-                help="글 생성 간격 슬라이더 값이 기본으로 적용됩니다.",
-            )
-            # 예상 종료 시간 미리보기
-            _n_pend = sum(1 for d in drafts if d["status"] == "pending")
-            if _n_pend > 1:
-                _end_preview = (
-                    _dt.datetime.combine(bulk_start_date, bulk_start_time)
-                    + _dt.timedelta(minutes=bulk_interval_min * (_n_pend - 1))
-                )
-                _today_str = "오늘" if _end_preview.date() == _dt.date.today() else _end_preview.strftime("%m/%d")
-                st.caption(f"예상 종료: **{_today_str} {_end_preview.strftime('%H:%M')}**")
-        with bc4:
-            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-            if st.button("자동 배정", use_container_width=True, key="bulk_assign"):
-                start_dt = _dt.datetime.combine(bulk_start_date, bulk_start_time)
-                _pending_idx = 0
-                for bi, d in enumerate(drafts):
-                    if d["status"] == "pending":
-                        assigned = start_dt + _dt.timedelta(minutes=bulk_interval_min * _pending_idx)
-                        st.session_state[f"sched_date_{bi}"] = assigned.date()
-                        st.session_state[f"sched_time_{bi}"] = assigned.time()
-                        _pending_idx += 1
-                st.rerun()
-
-    # ── 목록 헤더 ─────────────────────────────────────────────────────
-    hdr = st.columns([3, 3, 2, 2, 1])
-    for h, lbl in zip(hdr, ["키워드 / 제목", "이미지", "예약 날짜", "예약 시간", "상태"]):
-        h.markdown(f"**{lbl}**")
-    st.markdown("<hr style='margin:.4rem 0'>", unsafe_allow_html=True)
-
-    # ── 전체 예상 종료 시간 배너 ─────────────────────────────────────
-    _all_sched_times = []
+    # ── 전체 예상 종료 배너 ──────────────────────────────────────────
+    _all_sched_dts = []
     for _ci in range(len(drafts)):
-        _sd = st.session_state.get(f"sched_date_{_ci}")
+        _sd  = st.session_state.get(f"sched_date_{_ci}")
         _st2 = st.session_state.get(f"sched_time_{_ci}")
         if _sd and _st2:
-            _all_sched_times.append(_dt.datetime.combine(_sd, _st2))
-    if _all_sched_times:
-        _last_sched = max(_all_sched_times)
-        _today_str  = "오늘" if _last_sched.date() == _dt.date.today() else _last_sched.strftime("%m/%d")
+            _all_sched_dts.append(_dt.datetime.combine(_sd, _st2))
+    if _all_sched_dts:
+        _last_s = max(_all_sched_dts)
+        _td_s   = "오늘" if _last_s.date() == _dt.date.today() else _last_s.strftime("%m/%d")
         st.success(
-            f"예상 종료 시간: **{_today_str} {_last_sched.strftime('%H:%M')}** "
-            f"({len(drafts)}개 글, 간격 {gen_interval_min}분 기준)"
+            f"예상 종료 시간: **{_td_s} {_last_s.strftime('%H:%M')}** "
+            f"({len(drafts)}개 글 / 간격 {gen_interval_min}분)"
         )
+
+    # ── 목록 헤더 ────────────────────────────────────────────────────
+    _hc = st.columns([.35, 2.4, 2.6, 1.1, 1.9, 1.9, 1.8])
+    for _h, _hl in zip(_hc, ["#", "키워드", "제목", "이미지", "예약 날짜", "예약 시간", "상태"]):
+        _h.markdown(f"<small><b>{_hl}</b></small>", unsafe_allow_html=True)
+    st.markdown("<hr style='margin:.3rem 0'>", unsafe_allow_html=True)
 
     # ── 각 원고 행 ────────────────────────────────────────────────────
     _default_start = (_dt.datetime.now() + _dt.timedelta(minutes=gen_interval_min)).replace(
         second=0, microsecond=0
     )
+    _badge_cfg = {
+        "pending": ("🕐", "#1e3a5f", "#93c5fd", "대기"),
+        "sent":    ("✅", "#14532d", "#86efac", "전송완료"),
+        "failed":  ("❌", "#450a0a", "#fca5a5", "실패"),
+    }
     for di, draft in enumerate(drafts):
-        cols = st.columns([3, 3, 2, 2, 1])
+        rc = st.columns([.35, 2.4, 2.6, 1.1, 1.9, 1.9, 1.8])
 
-        # 키워드 + 제목
-        kw_disp    = draft["keyword"][:22] + ("…" if len(draft["keyword"]) > 22 else "")
-        title_disp = draft["title"][:30]  + ("…" if len(draft["title"]) > 30 else "")
-        cols[0].markdown(
-            f"<small><b>{kw_disp}</b><br>{title_disp}</small>",
+        rc[0].markdown(f"<small style='color:#9ca3af'>{di+1}</small>",
+                       unsafe_allow_html=True)
+        rc[1].markdown(
+            f"<small style='word-break:break-all'>{draft['keyword'][:30]}</small>",
+            unsafe_allow_html=True,
+        )
+        _td2 = draft["title"][:32] + ("…" if len(draft["title"]) > 32 else "")
+        rc[2].markdown(f"<small style='color:#d1d5db'>{_td2}</small>",
+                       unsafe_allow_html=True)
+        _has_img = bool(draft.get("img_info", {}).get("url"))
+        rc[3].markdown(
+            "<small style='color:#34d399'>📷</small>" if _has_img
+            else "<small style='color:#6b7280'>—</small>",
             unsafe_allow_html=True,
         )
 
-        # 이미지 썸네일
-        img_url = draft.get("img_info", {}).get("url", "")
-        if img_url:
-            cols[1].image(img_url, use_container_width=True)
+        _def_dt = _default_start + _dt.timedelta(minutes=gen_interval_min * di)
+        if draft["status"] == "pending":
+            rc[4].date_input("날짜",
+                value=st.session_state.get(f"sched_date_{di}", _def_dt.date()),
+                key=f"sched_date_{di}", label_visibility="collapsed")
+            rc[5].time_input("시간",
+                value=st.session_state.get(f"sched_time_{di}", _def_dt.time()),
+                step=60, key=f"sched_time_{di}", label_visibility="collapsed")
+        elif draft["status"] == "sent":
+            _sv4  = st.session_state.get(f"sched_date_{di}", "")
+            _stv4 = st.session_state.get(f"sched_time_{di}", "")
+            rc[4].markdown(f"<small style='color:#86efac'>{_sv4}</small>",
+                           unsafe_allow_html=True)
+            rc[5].markdown(
+                f"<small style='color:#86efac'>{str(_stv4)[:5] if _stv4 else ''}</small>",
+                unsafe_allow_html=True,
+            )
         else:
-            cols[1].markdown("<small style='color:#9ca3af'>이미지 없음</small>",
-                             unsafe_allow_html=True)
+            rc[4].markdown("<small style='color:#6b7280'>—</small>", unsafe_allow_html=True)
+            rc[5].markdown("<small style='color:#6b7280'>—</small>", unsafe_allow_html=True)
 
-        # 예약 날짜 / 시간
-        default_dt = _default_start + _dt.timedelta(minutes=gen_interval_min * di)
-        sched_date = cols[2].date_input(
-            "날짜",
-            value=st.session_state.get(f"sched_date_{di}", default_dt.date()),
-            key=f"sched_date_{di}",
-            label_visibility="collapsed",
+        _ic, _bg, _fc, _txt = _badge_cfg.get(
+            draft["status"], ("?", "#111", "#9ca3af", draft["status"])
         )
-        sched_time = cols[3].time_input(
-            "시간",
-            value=st.session_state.get(f"sched_time_{di}", default_dt.time()),
-            step=60,
-            key=f"sched_time_{di}",
-            label_visibility="collapsed",
-        )
-
-        # 상태 배지
-        _badge = {
-            "pending": "🕐 대기",
-            "sent":    "✅ 전송 완료",
-            "failed":  "❌ 실패",
-        }
-        badge_txt = _badge.get(draft["status"], draft["status"])
-        if draft["status"] == "sent" and draft.get("wp_link"):
-            cols[4].markdown(
-                f"<small>{badge_txt}<br>"
-                f"<a href='{draft['wp_link']}' target='_blank'>보기</a></small>",
+        if draft["status"] == "sent":
+            _wl2 = draft.get("wp_link", "")
+            _el2 = draft.get("edit_link", "")
+            _lh  = ""
+            if _wl2:
+                _lh += f"<a href='{_wl2}' target='_blank' style='color:#86efac'>글</a>"
+            if _el2:
+                _lh += f"&nbsp;<a href='{_el2}' target='_blank' style='color:#93c5fd'>편집</a>"
+            rc[6].markdown(
+                f"<div style='background:{_bg};border-radius:6px;padding:.25rem .4rem;"
+                f"text-align:center'><span style='color:{_fc};font-size:.72rem'>"
+                f"{_ic} {_txt}</span><br><small>{_lh}</small></div>",
                 unsafe_allow_html=True,
             )
         elif draft["status"] == "failed":
-            cols[4].markdown(
-                f"<small style='color:#ef4444'>{badge_txt}<br>"
-                f"{draft.get('error','')[:30]}</small>",
+            rc[6].markdown(
+                f"<div style='background:{_bg};border-radius:6px;padding:.25rem .4rem;"
+                f"text-align:center'><span style='color:{_fc};font-size:.72rem'>"
+                f"{_ic} {_txt}</span><br>"
+                f"<small style='color:#fca5a5'>{draft.get('error','')[:20]}</small></div>",
                 unsafe_allow_html=True,
             )
         else:
-            cols[4].markdown(f"<small>{badge_txt}</small>", unsafe_allow_html=True)
-
-        st.markdown("<hr style='margin:.2rem 0;border-color:#f3f4f6'>",
+            rc[6].markdown(
+                f"<div style='background:{_bg};border-radius:6px;padding:.25rem .4rem;"
+                f"text-align:center'><span style='color:{_fc};font-size:.72rem'>"
+                f"{_ic} {_txt}</span></div>",
+                unsafe_allow_html=True,
+            )
+        st.markdown("<hr style='margin:.12rem 0;border-color:#1f2937'>",
                     unsafe_allow_html=True)
 
+    # 목록 관리 버튼
+    _mc1, _mc2, _mc3 = st.columns(3)
+    with _mc1:
+        if st.button("✅ 전송 완료 삭제", use_container_width=True, key="del_sent"):
+            st.session_state.wp_drafts = [d for d in drafts if d["status"] != "sent"]
+            st.rerun()
+    with _mc2:
+        if st.button("🔁 실패 재시도", use_container_width=True, key="retry_fail2"):
+            for _d3 in drafts:
+                if _d3["status"] == "failed":
+                    _d3.update({"status": "pending", "error": ""})
+            st.rerun()
+    with _mc3:
+        if st.button("🗑️ 전체 초기화", use_container_width=True, key="clear_all2"):
+            st.session_state.wp_drafts = []
+            st.session_state.gen_log   = []
+            st.rerun()
+
     # ════════════════════════════════════════════════════════════════
-    # 워드프레스 예약 전송 버튼
+    # 워드프레스 예약 전송
     # ════════════════════════════════════════════════════════════════
     st.markdown("---")
+    wp_ready         = bool(WP_URL and WP_USERNAME and WP_APP_PASSWORD)
     n_pending_drafts = sum(1 for d in drafts if d["status"] == "pending")
     n_sent_drafts    = sum(1 for d in drafts if d["status"] == "sent")
 
-    send_col, info_col = st.columns([2, 3])
-    with info_col:
+    sc1, sc2 = st.columns([2, 3])
+    with sc2:
         st.markdown(
-            f"<small>대기 **{n_pending_drafts}**개 · 전송 완료 **{n_sent_drafts}**개 · "
-            f"전체 **{len(drafts)}**개</small>",
+            f"<div style='color:#9ca3af;font-size:.85rem;padding:.4rem 0'>"
+            f"대기 <b style='color:#93c5fd'>{n_pending_drafts}</b> · "
+            f"성공 <b style='color:#86efac'>{n_sent_drafts}</b> · "
+            f"실패 <b style='color:#fca5a5'>{n_failed}</b></div>",
             unsafe_allow_html=True,
         )
-
-    with send_col:
+    with sc1:
         wp_ready = bool(WP_URL and WP_USERNAME and WP_APP_PASSWORD)
         if st.button(
             "📅 워드프레스로 예약 전송",
-            type="primary",
-            use_container_width=True,
-            key="send_to_wp",
+            type="primary", use_container_width=True, key="send_to_wp",
             disabled=(not wp_ready or n_pending_drafts == 0),
         ):
-            if not wp_ready:
-                st.error(".env에 WordPress 정보(WP_URL / WP_USERNAME / WP_APP_PASSWORD)를 설정해 주세요.")
+            _to_send = [(i, d) for i, d in enumerate(drafts) if d["status"] == "pending"]
+            _prog2   = st.progress(0.0, text="WP 예약 전송 준비 중...")
+            _stg2    = st.empty()
+            _log("INFO", f"WP 예약 전송 시작 — {len(_to_send)}개")
+
+            for _si2, (_di2, _draft2) in enumerate(_to_send):
+                _kw2  = _draft2["keyword"]
+                _pct2 = _si2 / len(_to_send)
+                _def2 = _default_start + _dt.timedelta(minutes=gen_interval_min * _di2)
+                _sv5  = st.session_state.get(f"sched_date_{_di2}", _def2.date())
+                _stv5 = st.session_state.get(f"sched_time_{_di2}", _def2.time())
+                _ds5  = _dt.datetime.combine(_sv5, _stv5).strftime("%Y-%m-%dT%H:%M:%S")
+
+                _prog2.progress(_pct2,
+                    text=f"[{_si2+1}/{len(_to_send)}] 이미지 처리 중 — '{_kw2}'")
+                _stg2.info(f"단계 1/2 · **이미지 처리** — `{_kw2}`")
+                _log("INFO", f"[{_si2+1}] WP 전송: {_kw2[:35]} → {_ds5}")
+
+                _html2   = _draft2["content_html"]
+                _img2    = _draft2.get("img_info", {})
+                _feat2   = 0
+
+                if _img2.get("url"):
+                    if _draft2.get("set_featured", True):
+                        try:
+                            _feat2 = upload_pexels_to_wp_media(_img2, _kw2)
+                            _log("OK", f"대표 이미지 업로드 완료 (id={_feat2})")
+                        except Exception as _fie2:
+                            # fallback: 본문 삽입 강제
+                            _log("WARN", f"대표 이미지 실패 → 본문 fallback: {_fie2}")
+                            try:
+                                _html2 = insert_pexels_image_html(_html2, _img2, _kw2)
+                                _log("OK", "본문 이미지 삽입 완료 (fallback)")
+                            except Exception as _fbe2:
+                                _log("ERR", f"본문 이미지도 실패: {_fbe2}")
+                    else:
+                        try:
+                            _html2 = insert_pexels_image_html(_html2, _img2, _kw2)
+                        except Exception:
+                            pass
+
+                _prog2.progress(_pct2 + 0.4 / len(_to_send),
+                    text=f"[{_si2+1}/{len(_to_send)}] WP API 전송 중 — '{_kw2}'")
+                _stg2.info(
+                    f"단계 2/2 · **WP API 전송** — 예약: `{_ds5}`  \n"
+                    f"제목: *{_draft2['title'][:50]}*"
+                )
+
+                try:
+                    _result2 = post_to_wordpress(
+                        _draft2["title"], _html2,
+                        status="future",
+                        featured_media_id=_feat2,
+                        date_str=_ds5,
+                    )
+                    _pid2  = _result2.get("id", "")
+                    _wl2   = _result2.get("link", "")
+                    _el2   = (
+                        f"{WP_URL.rstrip('/')}/wp-admin/post.php?post={_pid2}&action=edit"
+                        if _pid2 else ""
+                    )
+                    st.session_state.wp_drafts[_di2].update({
+                        "status":    "sent",
+                        "wp_link":   _wl2,
+                        "edit_link": _el2,
+                        "error":     "",
+                    })
+                    _log("OK", f"발행 성공 ID:{_pid2} | {_wl2[:50]}")
+                except requests.HTTPError as _he2:
+                    _err2 = f"HTTP {_he2.response.status_code}: {_he2.response.text[:80]}"
+                    st.session_state.wp_drafts[_di2].update(
+                        {"status": "failed", "error": _err2}
+                    )
+                    _log("ERR", _err2)
+                except Exception as _we2:
+                    st.session_state.wp_drafts[_di2].update(
+                        {"status": "failed", "error": str(_we2)[:120]}
+                    )
+                    _log("ERR", str(_we2)[:80])
+
+            _stg2.empty()
+            _prog2.progress(1.0, text="전송 완료!")
+            _ok2  = sum(1 for d in st.session_state.wp_drafts if d["status"] == "sent")
+            _err3 = sum(1 for d in st.session_state.wp_drafts if d["status"] == "failed")
+            _log("OK", f"전송 완료 — 성공 {_ok2}개 / 실패 {_err3}개")
+            if _err3 == 0:
+                st.success(
+                    f"{_ok2}개 예약 전송 완료! "
+                    "워드프레스 관리자 → 글 → **예약됨** 에서 확인하세요."
+                )
             else:
-                prog = st.progress(0, text="워드프레스 예약 전송 중...")
-                to_send = [(i, d) for i, d in enumerate(drafts) if d["status"] == "pending"]
-                for si, (di, draft) in enumerate(to_send):
-                    prog.progress(si / len(to_send),
-                                  text=f"({si+1}/{len(to_send)}) '{draft['keyword']}' 전송 중...")
-                    sched_date_v = st.session_state.get(
-                        f"sched_date_{di}",
-                        (_default_start + _dt.timedelta(hours=2 * di)).date(),
-                    )
-                    sched_time_v = st.session_state.get(
-                        f"sched_time_{di}",
-                        (_default_start + _dt.timedelta(hours=2 * di)).time(),
-                    )
-                    sched_dt_str = _dt.datetime.combine(
-                        sched_date_v, sched_time_v
-                    ).strftime("%Y-%m-%dT%H:%M:%S")
-
-                    try:
-                        html = draft["content_html"]
-                        img_info = draft.get("img_info", {})
-                        feat_id  = 0
-                        if img_info.get("url"):
-                            if draft.get("set_featured", True):
-                                try:
-                                    feat_id = upload_pexels_to_wp_media(
-                                        img_info, draft["keyword"]
-                                    )
-                                except Exception:
-                                    html = insert_pexels_image_html(
-                                        html, img_info, draft["keyword"]
-                                    )
-                            else:
-                                html = insert_pexels_image_html(
-                                    html, img_info, draft["keyword"]
-                                )
-
-                        result = post_to_wordpress(
-                            draft["title"], html,
-                            status="future",
-                            featured_media_id=feat_id,
-                            date_str=sched_dt_str,
-                        )
-                        st.session_state.wp_drafts[di].update({
-                            "status":  "sent",
-                            "wp_link": result.get("link", ""),
-                            "error":   "",
-                        })
-                    except requests.HTTPError as e:
-                        err = f"HTTP {e.response.status_code}: {e.response.text[:120]}"
-                        st.session_state.wp_drafts[di].update({
-                            "status": "failed", "error": err,
-                        })
-                    except Exception as e:
-                        st.session_state.wp_drafts[di].update({
-                            "status": "failed", "error": str(e)[:120],
-                        })
-
-                prog.progress(1.0, text="전송 완료!")
-                sent_ok  = sum(1 for d in st.session_state.wp_drafts if d["status"] == "sent")
-                sent_err = sum(1 for d in st.session_state.wp_drafts if d["status"] == "failed")
-                if sent_err == 0:
-                    st.success(
-                        f"전체 {sent_ok}개 예약 전송 완료! "
-                        "워드프레스 관리자 → 글 → 예약됨 에서 확인하세요."
-                    )
-                else:
-                    st.warning(f"성공 {sent_ok}개 / 실패 {sent_err}개. 실패 항목을 확인해 주세요.")
-                st.rerun()
+                st.warning(f"성공 {_ok2}개 / 실패 {_err3}개. 실패 항목을 확인해 주세요.")
+            st.rerun()
 
     if not wp_ready:
         st.info("`.env` 파일에 `WP_URL`, `WP_USERNAME`, `WP_APP_PASSWORD`를 설정하면 "
                 "예약 전송 버튼이 활성화됩니다.", icon="ℹ️")
+
+    # ════════════════════════════════════════════════════════════════
+    # 발행 결과 테이블 (전송 완료 항목)
+    # ════════════════════════════════════════════════════════════════
+    _sent2 = [d for d in drafts if d["status"] == "sent"]
+    if _sent2:
+        st.markdown("---")
+        st.markdown("#### 발행 결과")
+        _rh = st.columns([.4, 3.2, 2.2, 2.2, 1.8])
+        for _rc, _rl in zip(_rh, ["#", "제목", "예약 시간", "글 보기", "편집"]):
+            _rc.markdown(f"<small><b>{_rl}</b></small>", unsafe_allow_html=True)
+        st.markdown("<hr style='margin:.3rem 0'>", unsafe_allow_html=True)
+        for _ri2, _rd2 in enumerate(_sent2):
+            _ri_full = next((i for i, d in enumerate(drafts) if d is _rd2), _ri2)
+            _rrow = st.columns([.4, 3.2, 2.2, 2.2, 1.8])
+            _rrow[0].markdown(f"<small style='color:#9ca3af'>{_ri2+1}</small>",
+                              unsafe_allow_html=True)
+            _rrow[1].markdown(
+                f"<small style='color:#e5e7eb'>{_rd2['title'][:50]}</small>",
+                unsafe_allow_html=True,
+            )
+            _sv6  = st.session_state.get(f"sched_date_{_ri_full}", "")
+            _stv6 = st.session_state.get(f"sched_time_{_ri_full}", "")
+            _rrow[2].markdown(
+                f"<small style='color:#93c5fd'>{_sv6} {str(_stv6)[:5] if _stv6 else ''}</small>",
+                unsafe_allow_html=True,
+            )
+            if _rd2.get("wp_link"):
+                _rrow[3].markdown(
+                    f"<a href='{_rd2['wp_link']}' target='_blank'"
+                    f" style='color:#34d399;font-size:.85rem'>글 보기 →</a>",
+                    unsafe_allow_html=True,
+                )
+            if _rd2.get("edit_link"):
+                _rrow[4].markdown(
+                    f"<a href='{_rd2['edit_link']}' target='_blank'"
+                    f" style='color:#818cf8;font-size:.85rem'>편집 →</a>",
+                    unsafe_allow_html=True,
+                )
+            st.markdown("<hr style='margin:.12rem 0;border-color:#1f2937'>",
+                        unsafe_allow_html=True)
+
+    # ════════════════════════════════════════════════════════════════
+    # 터미널 스타일 로그 콘솔
+    # ════════════════════════════════════════════════════════════════
+    if st.session_state.gen_log:
+        st.markdown("---")
+        with st.expander("🖥️ 로그 콘솔", expanded=False):
+            _log_html2 = "<br>".join(st.session_state.gen_log[:100])
+            st.markdown(
+                f'<div style="background:#0d1117;color:#c9d1d9;'
+                f'font-family:Courier New,monospace;font-size:.78rem;line-height:1.7;'
+                f'padding:1rem 1.2rem;border-radius:10px;border:1px solid #21262d;'
+                f'max-height:300px;overflow-y:auto">'
+                f'{_log_html2}</div>',
+                unsafe_allow_html=True,
+            )
+            if st.button("로그 지우기", key="clear_log"):
+                st.session_state.gen_log = []
+                st.rerun()
 
     st.stop()
 

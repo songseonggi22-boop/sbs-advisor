@@ -406,124 +406,28 @@ def build_html(name, contact, field, consultant, memo, df, total, subtotal, savi
 #            실제 주소는 build_excel 내부의 _make_cell_map()이 조합합니다.
 #
 CELL_MAP: dict[str, str | int] = {
-    # ── 고정 위치 ─────────────────────────────────────────────────────────────
-    "상담일자":           "D5",   # 상담 일자
-    "상담자":             "F5",   # 담당 상담사 이름
-    "연락처":             "F6",   # 고객 연락처
-    # ── 과정 테이블 기준 상수 (행은 n_courses로 동적 결정) ────────────────────
-    "과정_시작행":        8,      # 첫 번째 과정 데이터 행
-    "과정_기본수":        2,      # 템플릿에 미리 있는 과정 행 수
-    "과목명_열":          "B",    # 과목명 (B:C 병합셀 → B에 입력)
-    "과목수_열":          "D",    # COURSE 수
-    "일정_열":            "E",    # 수강 일정
-    "수강료_열":          "F",    # 수강료 정가 (F:G 병합셀 → F에 입력)
-    # ── 따즈아 합산 행 (과정_시작행 + n_courses, 열만 정의) ───────────────────
-    "따즈아_count_열":    "D",    # 총 과목 수
-    "따즈아_total_열":    "F",    # 원수강료 합계
-    # ── 할인 섹션 기준 상수 (과정_기본수 초과분만큼 오프셋 적용) ─────────────
-    "할인_기준행":        13,     # 2과목 기준 '명분①' 행
-    "명분_열":            "B",    # 할인 명분 텍스트
-    "할인율_열":          "D",    # 할인율 (소수, 예: 0.1)
-    "할인금액_열":        "E",    # 할인금액 (원)
-    # ── 합계 열 (모두 D열, 행은 할인_기준행+3 이후) ───────────────────────────
-    "합계_열":            "D",
+    # ── 과정 데이터 (고정 24행: D7~D30 = 과정명, E7~E30 = 등록비) ─────────────
+    "과정_시작행":  7,      # 첫 번째 과정 데이터 행
+    "과정_종료행":  30,     # 마지막 과정 데이터 행
+    "과정명_열":    "D",    # 과정명 입력 열
+    "등록비_열":    "E",    # 수강료 입력 열
+    # ── 합계 ──────────────────────────────────────────────────────────────────
+    "합계셀":       "E31",  # 총 등록비 (SUM 수식)
+    # ── 할인 섹션 (35~39행 고정, C=율, D=금액, E=잔액) ───────────────────────
+    "할인_시작행":  35,
+    "할인율_열":    "C",
+    "할인금액_열":  "D",
+    "잔액_열":      "E",
+    # ── 최종 합계 (병합셀 → 첫 번째 셀에 입력) ──────────────────────────────
+    "납부액셀":     "C40",  # 총 납부해야할 등록비 (C40:E40 병합)
+    "온라인셀":     "C41",  # 따따아 온라인 수강비 990,000 (변경 안 함)
+    "최종셀":       "C42",  # 총 납부할 수강료 (C42:E42 병합)
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 엑셀 견적서 생성 헬퍼
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _get_schedule(course_name: str) -> str:
-    """과정명에서 수강 일정 타입을 추론합니다."""
-    if "주말" in course_name:
-        return "주말"
-    if "방학" in course_name:
-        return "방학 특강"
-    return "평일 / 주말"
-
-
-def _copy_row_style(ws, source: int, target: int) -> None:
-    """source 행의 셀 서식(폰트·채우기·테두리·정렬·숫자형식)을 target 행에 복사합니다."""
-    from copy import copy
-    for col in range(1, ws.max_column + 1):
-        src = ws.cell(row=source, column=col)
-        tgt = ws.cell(row=target, column=col)
-        tgt.font          = copy(src.font)
-        tgt.fill          = copy(src.fill)
-        tgt.border        = copy(src.border)
-        tgt.alignment     = copy(src.alignment)
-        tgt.number_format = src.number_format
-
-
-def _fix_merged_cells(ws, insert_row: int, n_inserted: int) -> None:
-    """openpyxl insert_rows 후 자동 이동되지 않는 병합 셀을 수동으로 재조정합니다.
-    insert_row 이상에 있는 모든 병합 범위를 n_inserted만큼 아래로 밉니다."""
-    from openpyxl.utils import get_column_letter as gcl
-
-    to_remove, to_add = [], []
-    for mc in list(ws.merged_cells.ranges):
-        min_r, max_r = mc.min_row, mc.max_row
-        min_c, max_c = mc.min_col, mc.max_col
-        if min_r >= insert_row:
-            to_remove.append(mc)
-            to_add.append(
-                f"{gcl(min_c)}{min_r + n_inserted}:{gcl(max_c)}{max_r + n_inserted}"
-            )
-        elif max_r >= insert_row:
-            to_remove.append(mc)
-            to_add.append(
-                f"{gcl(min_c)}{min_r}:{gcl(max_c)}{max_r + n_inserted}"
-            )
-
-    for mc in to_remove:
-        ws.merged_cells.remove(mc)
-    for ref in to_add:
-        ws.merge_cells(ref)
-
-
-def _make_cell_map(n_courses: int) -> dict[str, str]:
-    """CELL_MAP 상수를 바탕으로 n_courses에 맞는 완전한 셀 주소 맵을 생성합니다."""
-    cm   = CELL_MAP
-    start = int(cm["과정_시작행"])
-    base  = int(cm["과정_기본수"])
-    disc  = int(cm["할인_기준행"])
-    off   = max(0, n_courses - base)
-    taja  = start + n_courses
-
-    r1, r2, r3 = disc + off, disc + off + 1, disc + off + 2
-    r16         = r3 + 1   # 총 할인금액
-    r17         = r16 + 1  # 납부 수강료
-    r18         = r17 + 1  # 총 등록금액
-    r19         = r18 + 1  # 3개월 할부
-    r20         = r19 + 1  # 6개월 할부
-    r21         = r20 + 1  # 과목당 수강료
-
-    return {
-        # 고정 셀
-        "상담일자":      cm["상담일자"],
-        "상담자":        cm["상담자"],
-        "연락처":        cm["연락처"],
-        # 따즈아 합산
-        "따즈아_count":  f"{cm['따즈아_count_열']}{taja}",
-        "따즈아_total":  f"{cm['따즈아_total_열']}{taja}",
-        # 할인 명분 ①②③
-        "명분1":         f"{cm['명분_열']}{r1}",
-        "할인율1":       f"{cm['할인율_열']}{r1}",
-        "할인금액1":     f"{cm['할인금액_열']}{r1}",
-        "명분2":         f"{cm['명분_열']}{r2}",
-        "할인율2":       f"{cm['할인율_열']}{r2}",
-        "할인금액2":     f"{cm['할인금액_열']}{r2}",
-        "명분3":         f"{cm['명분_열']}{r3}",
-        "할인율3":       f"{cm['할인율_열']}{r3}",
-        "할인금액3":     f"{cm['할인금액_열']}{r3}",
-        # 합계 행
-        "총할인금액":    f"{cm['합계_열']}{r16}",
-        "납부수강료":    f"{cm['합계_열']}{r17}",
-        "총등록금액":    f"{cm['합계_열']}{r18}",
-        "3개월할부":     f"{cm['합계_열']}{r19}",
-        "6개월할부":     f"{cm['합계_열']}{r20}",
-        "과목당수강료":  f"{cm['합계_열']}{r21}",
-    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -534,99 +438,64 @@ def build_excel(
     name: str, contact: str, field: str, consultant: str, memo: str,
     df: "pd.DataFrame", total: int, subtotal: int, savings: int,
     disc_rate: float, today: str,
-    disc_reason1: str = "", disc_rate1: float = 0.0,
-    disc_reason2: str = "", disc_rate2: float = 0.0,
-    disc_reason3: str = "", disc_rate3: float = 0.0,
+    disc_rate1: float = 0.0,
+    disc_rate2: float = 0.0,
+    disc_rate3: float = 0.0,
+    disc_rate4: float = 0.0,
+    disc_rate5: float = 0.0,
 ) -> bytes:
-    """견적서_양식.xlsx 템플릿을 로드해 CELL_MAP 기반으로 데이터를 기입합니다.
-    병합 셀·색상·폰트·테두리 등 서식을 100% 유지합니다."""
+    """패키지 견적서(고정).xlsx 템플릿을 로드해 CELL_MAP 기반으로 데이터를 기입합니다.
+    병합 셀·색상·폰트·테두리 등 서식을 100% 유지합니다.
+    할인 명분은 템플릿에 고정되어 있으며, 할인율(C열)만 입력합니다."""
 
-    TEMPLATE = ROOT / "견적서_양식.xlsx.xlsx"
+    TEMPLATE = ROOT / "패키지 견적서(고정).xlsx"
     wb = openpyxl.load_workbook(TEMPLATE)
-    ws = wb["단과과정"]
+    ws = wb.worksheets[0]   # 시트명: 견적서
 
-    n_courses     = len(df)
-    base          = int(CELL_MAP["과정_기본수"])
-    start         = int(CELL_MAP["과정_시작행"])
-    insert_before = start + base  # 따즈아 행 위치 (삽입 기준점)
+    cm       = CELL_MAP
+    start    = int(cm["과정_시작행"])   # 7
+    end      = int(cm["과정_종료행"])   # 30
+    col_name = cm["과정명_열"]          # D
+    col_fee  = cm["등록비_열"]          # E
 
-    # ── 1. 과정이 기본수 초과 시 추가 행 삽입 + 병합 셀 재조정 ──────────────
-    if n_courses > base:
-        extra = n_courses - base
-        ws.insert_rows(insert_before, extra)
-        _fix_merged_cells(ws, insert_row=insert_before, n_inserted=extra)
-        for i in range(extra):
-            new_r = insert_before + i
-            _copy_row_style(ws, source=start, target=new_r)
-            ws.merge_cells(f"B{new_r}:C{new_r}")
-            ws.merge_cells(f"F{new_r}:G{new_r}")
-
-    # ── 2. CELL_MAP으로 셀 주소 결정 ─────────────────────────────────────────
-    cm = _make_cell_map(n_courses)
-
-    # ── 3. 헤더 정보 ─────────────────────────────────────────────────────────
-    ws[cm["상담일자"]] = today        # =TODAY() 수식을 실제 값으로 대체
-    ws[cm["상담자"]]   = consultant
-    ws[cm["연락처"]]   = contact
-
-    # ── 4. 과정 데이터 행 채우기 ─────────────────────────────────────────────
-    col_name = CELL_MAP["과목명_열"]
-    col_cnt  = CELL_MAP["과목수_열"]
-    col_sch  = CELL_MAP["일정_열"]
-    col_fee  = CELL_MAP["수강료_열"]
+    # ── 1. 과정 데이터 채우기 (최대 24과목) ──────────────────────────────────
     for i, (_, row) in enumerate(df.iterrows()):
         r = start + i
+        if r > end:
+            break
         ws[f"{col_name}{r}"] = row["과정명"]
-        ws[f"{col_cnt}{r}"]  = 1
-        ws[f"{col_sch}{r}"]  = _get_schedule(row["과정명"])
         ws[f"{col_fee}{r}"]  = row["_price"]
 
-    # ── 5. 따즈아 합산 행 ────────────────────────────────────────────────────
-    ws[cm["따즈아_count"]]  = n_courses
-    ws[cm["따즈아_total"]]  = subtotal
+    # ── 2. 합계 수식 (E31 = SUM(E7:E30)) ─────────────────────────────────────
+    ws[cm["합계셀"]] = f"=SUM({col_fee}{start}:{col_fee}{end})"
 
-    # ── 6. 할인 섹션: 명분 텍스트 + 할인율 입력 (금액은 수식으로 자동 계산) ────
-    ws[cm["명분1"]]   = disc_reason1 or "과목 수 할인"
-    ws[cm["할인율1"]] = round(disc_rate1 / 100, 4)
+    # ── 3. 단계별 차감(Compound Discount) 수식 (35~39행) ─────────────────────
+    # 템플릿에 명분 텍스트가 고정되어 있으므로 C(율)·D(금액)·E(잔액)만 기입
+    disc_rates = [disc_rate1, disc_rate2, disc_rate3, disc_rate4, disc_rate5]
+    hr      = int(cm["할인_시작행"])   # 35
+    col_c   = cm["할인율_열"]           # C
+    col_d   = cm["할인금액_열"]         # D
+    col_e   = cm["잔액_열"]             # E
+    prev_e  = cm["합계셀"]              # E31 (첫 번째 단계의 기준)
 
-    ws[cm["명분2"]]   = disc_reason2 or "-"
-    ws[cm["할인율2"]] = round(disc_rate2 / 100, 4)
+    for i, rate in enumerate(disc_rates):
+        r        = hr + i   # 35, 36, 37, 38, 39
+        rate_dec = round(rate / 100, 4)
+        ws[f"{col_c}{r}"] = rate_dec
+        # 할인금액 = 이전 잔액 × 이 단계 할인율
+        ws[f"{col_d}{r}"] = f"={prev_e}*{col_c}{r}"
+        # 잔액 = 이전 잔액 × (1 - 이 단계 할인율)
+        ws[f"{col_e}{r}"] = f"={prev_e}*(1-{col_c}{r})"
+        prev_e = f"{col_e}{r}"
 
-    ws[cm["명분3"]]   = disc_reason3 or "-"
-    ws[cm["할인율3"]] = round(disc_rate3 / 100, 4)
+    # ── 4. 최종 합계 수식 ─────────────────────────────────────────────────────
+    last_e_row = hr + len(disc_rates) - 1        # 39
+    last_e     = f"{col_e}{last_e_row}"           # E39
+    ws[cm["납부액셀"]] = f"={last_e}"             # C40 = E39
+    # C41(따따아 온라인 수강비 990,000)은 템플릿 값 유지 — 변경 안 함
+    ws[cm["최종셀"]] = f"={cm['납부액셀']}+{cm['온라인셀']}"  # C42 = C40 + C41
 
-    # ── 7. 단계별 차감(Compound Discount) 수식 삽입 ──────────────────────────
-    # 엑셀에서 할인율(D열)만 바꿔도 금액이 자동 재계산됩니다.
-    F_tot = cm["따즈아_total"]          # 원수강료 셀 (예: F10)
-    D1, D2, D3 = cm["할인율1"], cm["할인율2"], cm["할인율3"]
-    E1, E2, E3 = cm["할인금액1"], cm["할인금액2"], cm["할인금액3"]
-    D_tot = cm["총할인금액"]
-    D_net = cm["납부수강료"]
-    D_reg = cm["총등록금액"]
-
-    # 개별 할인금액 (단계별 차감 — 이전 단계 잔액 기준)
-    # 할인금액① = 원수강료 × 율①
-    ws[E1] = f"={F_tot}*{D1}"
-    # 할인금액② = (원수강료 × (1-율①)) × 율②
-    ws[E2] = f"={F_tot}*(1-{D1})*{D2}"
-    # 할인금액③ = (원수강료 × (1-율①) × (1-율②)) × 율③
-    ws[E3] = f"={F_tot}*(1-{D1})*(1-{D2})*{D3}"
-
-    # 총 할인금액 = ①+②+③
-    ws[D_tot] = f"=SUM({E1},{E2},{E3})"
-
-    # 최종 납부금액 = 원수강료 × (1-율①) × (1-율②) × (1-율③)
-    ws[D_net] = f"={F_tot}*(1-{D1})*(1-{D2})*(1-{D3})"
-
-    # 총 등록금액 = 납부수강료 (온라인 추가금 없음)
-    ws[D_reg] = f"={D_net}"
-
-    # 할부 / 과목당
-    ws[cm["3개월할부"]]    = f"=ROUND({D_net}/3,-2)"
-    ws[cm["6개월할부"]]    = f"=ROUND({D_net}/6,-2)"
-    ws[cm["과목당수강료"]] = f"=ROUND({D_net}/{n_courses},-2)"
-
-    # ── 8. bytes 반환 ─────────────────────────────────────────────────────────
+    # ── 5. bytes 반환 ─────────────────────────────────────────────────────────
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -670,42 +539,28 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**💸 할인 설정**")
 
-    # ── 명분별 개별 할인율 입력 (최종 할인율 = 세 값의 합계) ─────────────────
-    st.markdown("**📝 할인 명분 & 개별 할인율**")
-    _c1, _c2 = st.columns([3, 1])
-    with _c1:
-        disc_reason1 = st.text_input("명분 ①", placeholder="예: 재원생 추천")
-    with _c2:
-        disc_rate1 = st.number_input(
-            "율① %", min_value=0, max_value=40, value=0, step=5,
-            help="명분①에 해당하는 할인율 (%)", key="dr1",
-        )
-
-    _c1, _c2 = st.columns([3, 1])
-    with _c1:
-        disc_reason2 = st.text_input("명분 ②", placeholder="예: SNS 리뷰 작성")
-    with _c2:
-        disc_rate2 = st.number_input(
-            "율② %", min_value=0, max_value=40, value=0, step=5,
-            help="명분②에 해당하는 할인율 (%)", key="dr2",
-        )
-
-    _c1, _c2 = st.columns([3, 1])
-    with _c1:
-        disc_reason3 = st.text_input("명분 ③", placeholder="예: 카드 일시불 결제")
-    with _c2:
-        disc_rate3 = st.number_input(
-            "율③ %", min_value=0, max_value=40, value=0, step=5,
-            help="명분③에 해당하는 할인율 (%)", key="dr3",
-        )
+    # ── 단계별 할인율 입력 (명분은 엑셀 템플릿에 고정) ───────────────────────
+    st.markdown("**📝 단계별 할인율 (엑셀 고정 명분)**")
+    _DISC_LABELS = [
+        "① 8개과목↑ 패키지 할인",
+        "② 따따아 우선 등록",
+        "③ 첫 결제 패키지 할인",
+        "④ 원장 결재권한 할인",
+        "⑤ 기타 할인",
+    ]
+    _disc_rates_list = [
+        st.number_input(_lbl, min_value=0, max_value=40, value=0, step=5, key=f"dr{_i+1}")
+        for _i, _lbl in enumerate(_DISC_LABELS)
+    ]
+    disc_rate1, disc_rate2, disc_rate3, disc_rate4, disc_rate5 = _disc_rates_list
 
     # 단계별 차감(Compound Discount) 최종 할인율 자동 계산
-    _r1, _r2, _r3 = disc_rate1 / 100, disc_rate2 / 100, disc_rate3 / 100
-    s_discount = round((1 - (1 - _r1) * (1 - _r2) * (1 - _r3)) * 100, 2)
-    if disc_rate1 or disc_rate2 or disc_rate3:
+    _rs = [r / 100 for r in _disc_rates_list]
+    s_discount = round((1 - (1-_rs[0])*(1-_rs[1])*(1-_rs[2])*(1-_rs[3])*(1-_rs[4])) * 100, 2)
+    if any(_disc_rates_list):
         st.info(
             f"복합 할인율: **{s_discount:.1f}%**  \n"
-            f"({disc_rate1}% → {disc_rate2}% → {disc_rate3}% 순차 적용)",
+            f"({' → '.join(f'{r}%' for r in _disc_rates_list if r)} 순차 적용)",
         )
 
     # ── 참고: 과목수 기반 자동 계산 ──────────────────────────────────────────
@@ -1015,18 +870,14 @@ with col_right:
     st.metric("정가 합계",   fmt_won(subtotal))
 
     # ── 단계별 할인 미리보기 ──────────────────────────────────────────────────
-    if subtotal > 0 and (disc_rate1 or disc_rate2 or disc_rate3):
-        _p0 = subtotal
-        _p1 = round(_p0 * (1 - disc_rate1 / 100))
-        _p2 = round(_p1 * (1 - disc_rate2 / 100))
-        _p3 = round(_p2 * (1 - disc_rate3 / 100))
-        _rows = [f"**정가** → {fmt_won(_p0)}"]
-        if disc_rate1:
-            _rows.append(f"① _{disc_reason1 or '명분①'}_ -{disc_rate1}% → **{fmt_won(_p1)}**")
-        if disc_rate2:
-            _rows.append(f"② _{disc_reason2 or '명분②'}_ -{disc_rate2}% → **{fmt_won(_p2)}**")
-        if disc_rate3:
-            _rows.append(f"③ _{disc_reason3 or '명분③'}_ -{disc_rate3}% → **{fmt_won(_p3)}**")
+    _disc_short = ["8개↑할인", "따따아등록", "첫결제", "원장권한", "기타"]
+    if subtotal > 0 and any([disc_rate1, disc_rate2, disc_rate3, disc_rate4, disc_rate5]):
+        _p = subtotal
+        _rows = [f"**정가** → {fmt_won(_p)}"]
+        for _dr, _lbl in zip([disc_rate1, disc_rate2, disc_rate3, disc_rate4, disc_rate5], _disc_short):
+            if _dr:
+                _p = round(_p * (1 - _dr / 100))
+                _rows.append(f"_{_lbl}_ -{_dr}% → **{fmt_won(_p)}**")
         with st.expander("📊 단계별 할인 미리보기", expanded=True):
             for _r in _rows:
                 st.markdown(_r)
@@ -1083,9 +934,8 @@ else:
     excel_bytes  = build_excel(
         client_name, s_contact, s_field, s_consultant, s_memo,
         df, total, subtotal, savings, float(s_discount), today_str,
-        disc_reason1, float(disc_rate1),
-        disc_reason2, float(disc_rate2),
-        disc_reason3, float(disc_rate3),
+        float(disc_rate1), float(disc_rate2), float(disc_rate3),
+        float(disc_rate4), float(disc_rate5),
     )
 
     btn_col1, btn_col2, btn_col3, btn_col4 = st.columns(4)

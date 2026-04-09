@@ -33,10 +33,43 @@ WP_APP_PASSWORD = os.getenv("WP_APP_PASSWORD", "")
 PEXELS_API_KEY  = os.getenv("PEXELS_API_KEY", "")  # Pexels — 실사 이미지 검색용
 
 # ── 경로 ─────────────────────────────────────────────────────────────────────
-ROOT       = Path(__file__).parent
-LOGS_DIR   = ROOT / "logs"
-QUEUE_FILE = ROOT / "queue.json"
+ROOT          = Path(__file__).parent
+LOGS_DIR      = ROOT / "logs"
+QUEUE_FILE    = ROOT / "queue.json"
+SECRETS_FILE  = ROOT / "secrets_config.json"
 LOGS_DIR.mkdir(exist_ok=True)
+
+# ── secrets_config.json 로드/저장 ─────────────────────────────────────────────
+# base64 obfuscation — .gitignore에 추가 권장
+_OBFUSCATE_KEY = b"sbs-academy-daejeon-2024"
+
+def _xor_b64(text: str) -> str:
+    """간단한 XOR+base64 난독화 (단방향 아님, 로컬 편의 목적)."""
+    key = _OBFUSCATE_KEY
+    raw = text.encode("utf-8")
+    xored = bytes(b ^ key[i % len(key)] for i, b in enumerate(raw))
+    return base64.b64encode(xored).decode("utf-8")
+
+def _xor_b64_decode(encoded: str) -> str:
+    key = _OBFUSCATE_KEY
+    xored = base64.b64decode(encoded.encode("utf-8"))
+    raw = bytes(b ^ key[i % len(key)] for i, b in enumerate(xored))
+    return raw.decode("utf-8")
+
+def load_secrets() -> dict:
+    """secrets_config.json에서 저장된 API 키를 반환합니다."""
+    try:
+        if SECRETS_FILE.exists():
+            raw = json.loads(SECRETS_FILE.read_text(encoding="utf-8"))
+            return {k: _xor_b64_decode(v) for k, v in raw.items()}
+    except Exception:
+        pass
+    return {}
+
+def save_secrets(data: dict) -> None:
+    """API 키를 난독화해 secrets_config.json에 저장합니다."""
+    encoded = {k: _xor_b64(v) for k, v in data.items() if v}
+    SECRETS_FILE.write_text(json.dumps(encoded, indent=2), encoding="utf-8")
 
 # ── 페이지 설정 ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -660,14 +693,37 @@ def save_queue(queue: list) -> None:
 
 # ── 백그라운드 발행 스레드 ─────────────────────────────────────────────────────
 
-_BG_STATE: dict = {"running": False, "stop": False, "thread": None}
+_BG_STATE: dict = {
+    "running":         False,
+    "stop":            False,
+    "thread":          None,
+    # ── 실시간 모니터링 ──────────────────────
+    "current_keyword": "",          # 현재 처리 중인 키워드
+    "stage":           "",          # generating / image / publishing / waiting
+    "next_publish_at": 0.0,         # 다음 발행 예정 timestamp
+    "interval_secs":   3600,        # 현재 발행 간격
+    "activity_log":    [],          # [{time, keyword, status, message, link}]
+}
+
+
+def _log_activity(keyword: str, status: str, message: str, link: str = "") -> None:
+    """활동 로그를 _BG_STATE에 최신순으로 최대 50개 유지합니다."""
+    entry = {
+        "time":    datetime.now().strftime("%H:%M:%S"),
+        "keyword": keyword,
+        "status":  status,   # "✅ 성공" / "❌ 실패" / "⚙️ 처리중"
+        "message": message,
+        "link":    link,
+    }
+    _BG_STATE["activity_log"] = ([entry] + _BG_STATE["activity_log"])[:50]
 
 
 def _bg_worker(interval_secs: int, gemini_key: str, pexels_key: str,
                wp_status: str, include_img: bool, set_as_featured: bool = True) -> None:
     """백그라운드 스레드: 큐에서 키워드를 순서대로 꺼내 발행합니다."""
-    _BG_STATE["running"] = True
-    _BG_STATE["stop"]    = False
+    _BG_STATE["running"]       = True
+    _BG_STATE["stop"]          = False
+    _BG_STATE["interval_secs"] = interval_secs
     try:
         while not _BG_STATE["stop"]:
             queue   = load_queue()
@@ -679,8 +735,11 @@ def _bg_worker(interval_secs: int, gemini_key: str, pexels_key: str,
             queue[idx].update({"status": "processing",
                                 "started_at": datetime.now().strftime("%Y-%m-%d %H:%M")})
             save_queue(queue)
+            _BG_STATE["current_keyword"] = kw
             try:
                 # 1. 원고 생성
+                _BG_STATE["stage"] = "generating"
+                _log_activity(kw, "⚙️ 처리중", "Gemini 원고 생성 중...")
                 genai.configure(api_key=gemini_key)
                 model = genai.GenerativeModel(
                     model_name="gemini-2.5-flash",
@@ -691,15 +750,19 @@ def _bg_worker(interval_secs: int, gemini_key: str, pexels_key: str,
                 )
                 title = extract_title(clean_text)
                 # 2. Pexels 이미지
+                _BG_STATE["stage"] = "image"
                 img_info   = {}
                 img_status = "—"
                 if include_img and pexels_key and img_keyword:
+                    _log_activity(kw, "⚙️ 처리중", f"Pexels 이미지 검색 중: {img_keyword}")
                     try:
                         img_info   = fetch_pexels_image(img_keyword, pexels_key)
                         img_status = "✅ 완료" if img_info else "⚠️ 결과없음"
                     except Exception:
                         img_status = "❌ 실패"
                 # 3. HTML 변환 + 헤딩 보정
+                _BG_STATE["stage"] = "publishing"
+                _log_activity(kw, "⚙️ 처리중", "워드프레스 발행 중...")
                 html    = md_lib.markdown(clean_text, extensions=["tables", "fenced_code"])
                 html    = fix_heading_levels(html)
                 feat_id = 0
@@ -708,32 +771,40 @@ def _bg_worker(interval_secs: int, gemini_key: str, pexels_key: str,
                         try:
                             feat_id = upload_pexels_to_wp_media(img_info, kw)
                         except Exception:
-                            # 대표 이미지 업로드 실패 시 본문 삽입으로 fallback
                             html = insert_pexels_image_html(html, img_info, kw)
                     else:
                         html = insert_pexels_image_html(html, img_info, kw)
                 wp_result = post_to_wordpress(title, html, status=wp_status,
                                               featured_media_id=feat_id)
+                post_link = wp_result.get("link", "")
                 queue = load_queue()
                 queue[idx].update({
                     "status":       "done",
                     "img_status":   img_status,
                     "post_id":      wp_result.get("id"),
-                    "post_link":    wp_result.get("link", ""),
+                    "post_link":    post_link,
                     "completed_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
                     "error":        "",
                 })
                 save_queue(queue)
+                _log_activity(kw, "✅ 성공", f"발행 완료 — {title}", post_link)
             except Exception as e:
                 queue = load_queue()
                 queue[idx].update({"status": "failed", "error": str(e)[:120]})
                 save_queue(queue)
+                _log_activity(kw, "❌ 실패", str(e)[:100])
             # 다음 항목 대기
             if not _BG_STATE["stop"]:
                 if any(i["status"] == "pending" for i in load_queue()):
+                    _BG_STATE["stage"]          = "waiting"
+                    _BG_STATE["current_keyword"] = ""
+                    _BG_STATE["next_publish_at"] = time.time() + interval_secs
                     time.sleep(interval_secs)
     finally:
-        _BG_STATE["running"] = False
+        _BG_STATE["running"]         = False
+        _BG_STATE["current_keyword"] = ""
+        _BG_STATE["stage"]           = ""
+        _BG_STATE["next_publish_at"] = 0.0
 
 
 def post_to_wordpress(title: str, content: str, status: str = "publish",
@@ -758,6 +829,45 @@ def post_to_wordpress(title: str, content: str, status: str = "publish",
     )
     resp.raise_for_status()
     return resp.json()
+
+
+def instant_publish(kw: str, gemini_key: str, pexels_key: str,
+                    wp_status: str, include_img: bool,
+                    set_as_featured: bool) -> tuple[bool, str]:
+    """단일 키워드를 즉시 발행하고 (성공여부, 메시지)를 반환합니다."""
+    try:
+        genai.configure(api_key=gemini_key)
+        model = genai.GenerativeModel(
+            model_name="gemini-2.5-flash",
+            system_instruction=BLOG_DEFAULT_PROMPT,
+        )
+        clean_text, img_keyword = extract_image_prompt(
+            model.generate_content(f"결과를 작성할 메인 키워드: {kw}").text
+        )
+        title    = extract_title(clean_text)
+        img_info = {}
+        if include_img and pexels_key and img_keyword:
+            try:
+                img_info = fetch_pexels_image(img_keyword, pexels_key)
+            except Exception:
+                pass
+        html    = md_lib.markdown(clean_text, extensions=["tables", "fenced_code"])
+        html    = fix_heading_levels(html)
+        feat_id = 0
+        if img_info.get("url"):
+            if set_as_featured:
+                try:
+                    feat_id = upload_pexels_to_wp_media(img_info, kw)
+                except Exception:
+                    html = insert_pexels_image_html(html, img_info, kw)
+            else:
+                html = insert_pexels_image_html(html, img_info, kw)
+        result = post_to_wordpress(title, html, status=wp_status,
+                                   featured_media_id=feat_id)
+        link = result.get("link", "")
+        return True, f"발행 완료! [{title}]({link})"
+    except Exception as e:
+        return False, str(e)[:200]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -926,19 +1036,48 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("**🤖 AI 멘토링 설정**")
+
+    # ── secrets_config.json 자동 로드 ─────────────────────────────────────────
+    _saved = load_secrets()
+    _saved_gemini = _saved.get("gemini_api_key", "")
+    _saved_pexels = _saved.get("pexels_api_key", "") or PEXELS_API_KEY
+
     gemini_api_key = st.text_input(
         "Gemini API Key",
         type="password",
         placeholder="AIza...",
+        value=_saved_gemini,
         help="Google AI Studio에서 발급한 Gemini API Key를 입력하세요.",
     )
     pexels_api_key = st.text_input(
         "Pexels API Key (이미지 검색용)",
         type="password",
         placeholder="BzAz...",
-        value=PEXELS_API_KEY,
+        value=_saved_pexels,
         help="pexels.com/api 에서 무료 발급. 실사 이미지 자동 삽입에 사용됩니다.",
     )
+
+    # ── 설정 기억 체크박스 ─────────────────────────────────────────────────────
+    _remember = st.checkbox(
+        "설정 기억하기 (로컬 저장)",
+        value=bool(_saved_gemini or _saved_pexels),
+        key="remember_secrets",
+        help="체크 시 API 키를 secrets_config.json에 저장합니다. 앱 재시작 시 자동 로드됩니다.",
+    )
+    if _remember:
+        _to_save = {}
+        if gemini_api_key:
+            _to_save["gemini_api_key"] = gemini_api_key
+        if pexels_api_key:
+            _to_save["pexels_api_key"] = pexels_api_key
+        if _to_save:
+            save_secrets(_to_save)
+    elif SECRETS_FILE.exists() and not _remember:
+        # 체크 해제 시 저장 파일 삭제
+        try:
+            SECRETS_FILE.unlink()
+        except Exception:
+            pass
 
     st.markdown("---")
     if st.button("🔄 수강료 데이터 새로고침", use_container_width=True):
@@ -1190,144 +1329,281 @@ if menu == "📅 예약 대시보드":
 </div>
 """, unsafe_allow_html=True)
 
-    # ── 키워드 큐 관리 ────────────────────────────────────────────────────────
-    st.markdown("#### 키워드 큐 관리")
-    add_col1, add_col2 = st.columns([4, 1])
-    with add_col1:
-        new_kw = st.text_input("키워드 추가", placeholder="SBS아카데미 대전 영상편집 과정",
-                               label_visibility="collapsed", key="new_kw_input")
-    with add_col2:
-        if st.button("+ 큐에 추가", use_container_width=True, key="add_kw"):
-            if new_kw.strip():
-                q = load_queue()
-                q.append({"keyword": new_kw.strip(), "status": "pending",
-                           "added_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                           "img_status": "—", "post_id": None,
-                           "post_link": "", "error": ""})
-                save_queue(q)
-                st.rerun()
+    # ════════════════════════════════════════════════════════════════
+    # 2단 레이아웃: 왼쪽(큐+설정) / 오른쪽(실시간 모니터링)
+    # ════════════════════════════════════════════════════════════════
+    left_col, right_col = st.columns([3, 2], gap="large")
 
-    with st.expander("📋 여러 키워드 한 번에 추가"):
-        bulk_kw = st.text_area("키워드 목록 (한 줄에 하나씩)", height=140,
-                               placeholder="SBS아카데미 대전 포토샵 수업\nSBS아카데미 대전 웹디자인 취업\n...",
-                               key="bulk_kw")
-        if st.button("모두 큐에 추가", key="bulk_add"):
-            kws = [k.strip() for k in bulk_kw.strip().splitlines() if k.strip()]
-            if kws:
-                q = load_queue()
-                for kw in kws:
-                    q.append({"keyword": kw, "status": "pending",
+    # ── ① 왼쪽: 키워드 큐 관리 ──────────────────────────────────────
+    with left_col:
+        st.markdown("#### 키워드 큐 관리")
+
+        # 키워드 단일 추가
+        add_col1, add_col2 = st.columns([4, 1])
+        with add_col1:
+            new_kw = st.text_input("키워드 추가", placeholder="SBS아카데미 대전 영상편집 과정",
+                                   label_visibility="collapsed", key="new_kw_input")
+        with add_col2:
+            if st.button("+ 추가", use_container_width=True, key="add_kw"):
+                if new_kw.strip():
+                    q = load_queue()
+                    q.append({"keyword": new_kw.strip(), "status": "pending",
                                "added_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
                                "img_status": "—", "post_id": None,
                                "post_link": "", "error": ""})
-                save_queue(q)
-                st.rerun()
+                    save_queue(q)
+                    st.rerun()
 
-    # ── 큐 현황 테이블 ────────────────────────────────────────────────────────
-    queue = load_queue()
-    n_total     = len(queue)
-    n_pending   = sum(1 for i in queue if i["status"] == "pending")
-    n_done      = sum(1 for i in queue if i["status"] == "done")
-    n_fail      = sum(1 for i in queue if i["status"] == "failed")
-    n_proc      = sum(1 for i in queue if i["status"] == "processing")
+        with st.expander("📋 여러 키워드 한 번에 추가"):
+            bulk_kw = st.text_area("키워드 목록 (한 줄에 하나씩)", height=120,
+                                   placeholder="SBS아카데미 대전 포토샵 수업\nSBS아카데미 대전 웹디자인 취업\n...",
+                                   key="bulk_kw")
+            if st.button("모두 큐에 추가", key="bulk_add"):
+                kws = [k.strip() for k in bulk_kw.strip().splitlines() if k.strip()]
+                if kws:
+                    q = load_queue()
+                    for kw in kws:
+                        q.append({"keyword": kw, "status": "pending",
+                                   "added_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                                   "img_status": "—", "post_id": None,
+                                   "post_link": "", "error": ""})
+                    save_queue(q)
+                    st.rerun()
 
-    if queue:
+        # 큐 현황 카운터
+        queue    = load_queue()
+        n_total  = len(queue)
+        n_pending = sum(1 for i in queue if i["status"] == "pending")
+        n_done   = sum(1 for i in queue if i["status"] == "done")
+        n_fail   = sum(1 for i in queue if i["status"] == "failed")
+        n_proc   = sum(1 for i in queue if i["status"] == "processing")
+
         st.markdown(
-            f"**큐 현황** — 전체 {n_total}개 &nbsp;|&nbsp; "
-            f"대기 {n_pending} · 처리중 {n_proc} · 완료 {n_done} · 실패 {n_fail}"
+            f"<small>전체 **{n_total}** &nbsp;·&nbsp; "
+            f"대기 **{n_pending}** &nbsp;·&nbsp; "
+            f"처리중 **{n_proc}** &nbsp;·&nbsp; "
+            f"완료 **{n_done}** &nbsp;·&nbsp; "
+            f"실패 **{n_fail}**</small>",
+            unsafe_allow_html=True,
         )
-        display_cols = ["keyword", "status", "img_status", "post_link", "error", "added_at"]
-        col_labels   = ["키워드", "상태", "이미지", "발행 링크", "오류", "추가 시각"]
-        df_q = pd.DataFrame(queue)[display_cols]
-        df_q.columns = col_labels
-        st.dataframe(df_q, use_container_width=True,
-                     height=min(38 * (len(df_q) + 2) + 10, 420))
 
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            if st.button("✅ 완료 항목 삭제", use_container_width=True, key="del_done"):
-                save_queue([i for i in queue if i["status"] != "done"])
-                st.rerun()
-        with c2:
-            if st.button("🔁 실패 항목 재시도", use_container_width=True, key="retry_fail"):
-                for i in queue:
-                    if i["status"] == "failed":
-                        i.update({"status": "pending", "error": ""})
-                save_queue(queue)
-                st.rerun()
-        with c3:
-            if st.button("🗑️ 전체 초기화", use_container_width=True, key="clear_all_q"):
-                save_queue([])
-                st.rerun()
-    else:
-        st.info("큐가 비어 있습니다. 위에서 키워드를 추가해 주세요.")
-
-    # ── 발행 설정 ─────────────────────────────────────────────────────────────
-    st.markdown("---")
-    st.markdown("#### 발행 설정")
-    opt_c1, opt_c2, opt_c3, opt_c4 = st.columns(4)
-    with opt_c1:
+        # ── 발행 설정 ────────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### 발행 설정")
         interval_min = st.slider(
-            "발행 간격", min_value=30, max_value=360, value=60, step=30,
+            "발행 간격 (분)", min_value=30, max_value=360, value=60, step=30,
             format="%d분", key="dash_interval",
             help="포스팅 1개 완료 후 다음 포스팅까지 대기 시간",
         )
-    with opt_c2:
-        dash_include_img = st.checkbox("📷 Pexels 이미지 자동 삽입", value=True, key="dash_img")
-    with opt_c3:
-        dash_set_featured = st.checkbox(
-            "🖼️ 대표 이미지로 등록",
-            value=True,
-            key="dash_featured",
-            help="이미지를 본문에 삽입하지 않고 Featured Image로만 등록",
-            disabled=not st.session_state.get("dash_img", True),
-        )
-    with opt_c4:
-        dash_wp_status = st.radio(
-            "발행 상태", ["publish", "draft"],
-            format_func=lambda x: "즉시 발행" if x == "publish" else "임시저장",
-            key="dash_wp_status",
-        )
+        cfg_c1, cfg_c2, cfg_c3 = st.columns(3)
+        with cfg_c1:
+            dash_include_img = st.checkbox("📷 이미지 삽입", value=True, key="dash_img")
+        with cfg_c2:
+            dash_set_featured = st.checkbox(
+                "🖼️ 대표 이미지",
+                value=True, key="dash_featured",
+                help="Featured Image로만 등록 (본문 중복 삽입 방지)",
+                disabled=not st.session_state.get("dash_img", True),
+            )
+        with cfg_c3:
+            dash_wp_status = st.radio(
+                "발행 상태", ["publish", "draft"],
+                format_func=lambda x: "즉시 발행" if x == "publish" else "임시저장",
+                key="dash_wp_status",
+            )
 
-    # ── 제어 버튼 ─────────────────────────────────────────────────────────────
-    st.markdown("---")
-    btn_c1, btn_c2, btn_c3 = st.columns(3)
-    with btn_c1:
-        start_disabled = _BG_STATE["running"] or n_pending == 0
-        if st.button("🚀 자동 발행 시작", type="primary",
-                     use_container_width=True, key="dash_start",
-                     disabled=start_disabled):
-            if not gemini_api_key:
-                st.warning("사이드바에서 Gemini API Key를 입력해 주세요.")
-            elif not (WP_URL and WP_USERNAME and WP_APP_PASSWORD):
-                st.warning(".env에 WordPress 정보를 설정해 주세요.")
-            else:
-                t = threading.Thread(
-                    target=_bg_worker,
-                    args=(interval_min * 60, gemini_api_key,
-                          pexels_api_key, dash_wp_status,
-                          dash_include_img, dash_set_featured),
-                    daemon=True,
-                )
-                _BG_STATE["thread"] = t
-                t.start()
+        # ── 제어 버튼 ────────────────────────────────────────────────
+        st.markdown("---")
+        btn_c1, btn_c2, btn_c3 = st.columns(3)
+        with btn_c1:
+            if st.button("🚀 자동 발행 시작", type="primary",
+                         use_container_width=True, key="dash_start",
+                         disabled=(_BG_STATE["running"] or n_pending == 0)):
+                if not gemini_api_key:
+                    st.warning("사이드바에서 Gemini API Key를 입력해 주세요.")
+                elif not (WP_URL and WP_USERNAME and WP_APP_PASSWORD):
+                    st.warning(".env에 WordPress 정보를 설정해 주세요.")
+                else:
+                    t = threading.Thread(
+                        target=_bg_worker,
+                        args=(interval_min * 60, gemini_api_key,
+                              pexels_api_key, dash_wp_status,
+                              dash_include_img, dash_set_featured),
+                        daemon=True,
+                    )
+                    _BG_STATE["thread"] = t
+                    t.start()
+                    st.rerun()
+        with btn_c2:
+            if st.button("⏹ 중지", use_container_width=True, key="dash_stop",
+                         disabled=not _BG_STATE["running"]):
+                _BG_STATE["stop"] = True
                 st.rerun()
-    with btn_c2:
-        if st.button("⏹ 중지", use_container_width=True, key="dash_stop",
-                     disabled=not _BG_STATE["running"]):
-            _BG_STATE["stop"] = True
-            st.rerun()
-    with btn_c3:
-        if st.button("🔄 새로고침", use_container_width=True, key="dash_refresh"):
-            st.rerun()
+        with btn_c3:
+            if st.button("🔄 새로고침", use_container_width=True, key="dash_refresh"):
+                st.rerun()
 
-    # ── 실행 상태 표시 & 자동 폴링 ───────────────────────────────────────────
+        # ── 큐 행별 렌더링 (즉시 발행 버튼 포함) ────────────────────
+        st.markdown("---")
+        st.markdown("#### 예약 목록")
+
+        _STATUS_ICON = {
+            "pending":    "🕐 대기",
+            "processing": "⚙️ 처리중",
+            "done":       "✅ 완료",
+            "failed":     "❌ 실패",
+        }
+
+        if not queue:
+            st.info("큐가 비어 있습니다. 위에서 키워드를 추가해 주세요.")
+        else:
+            # 헤더
+            hc = st.columns([3, 1, 1, 1, 1])
+            for h, t_ in zip(hc, ["키워드", "상태", "이미지", "링크", "즉시발행"]):
+                h.markdown(f"<small><b>{t_}</b></small>", unsafe_allow_html=True)
+            st.markdown("<hr style='margin:.3rem 0'>", unsafe_allow_html=True)
+
+            for row_i, item in enumerate(queue):
+                rc = st.columns([3, 1, 1, 1, 1])
+                kw_disp = item["keyword"][:28] + ("…" if len(item["keyword"]) > 28 else "")
+                rc[0].markdown(f"<small>{kw_disp}</small>", unsafe_allow_html=True)
+                rc[1].markdown(
+                    f"<small>{_STATUS_ICON.get(item['status'], item['status'])}</small>",
+                    unsafe_allow_html=True,
+                )
+                rc[2].markdown(
+                    f"<small>{item.get('img_status','—')}</small>",
+                    unsafe_allow_html=True,
+                )
+                link = item.get("post_link", "")
+                if link:
+                    rc[3].markdown(f"<small><a href='{link}' target='_blank'>보기</a></small>",
+                                   unsafe_allow_html=True)
+                else:
+                    rc[3].markdown("<small>—</small>", unsafe_allow_html=True)
+
+                # 즉시 발행 버튼 — pending / failed 항목만 활성
+                can_instant = item["status"] in ("pending", "failed")
+                if rc[4].button("⚡", key=f"instant_{row_i}",
+                                disabled=(not can_instant or not gemini_api_key)):
+                    with st.spinner(f"'{item['keyword']}' 즉시 발행 중..."):
+                        ok, msg = instant_publish(
+                            item["keyword"], gemini_api_key, pexels_api_key,
+                            dash_wp_status, dash_include_img, dash_set_featured,
+                        )
+                    q2 = load_queue()
+                    if ok:
+                        # 링크 파싱: "발행 완료! [title](link)" → link 추출
+                        _lm = re.search(r'\(([^)]+)\)$', msg)
+                        _link = _lm.group(1) if _lm else ""
+                        q2[row_i].update({
+                            "status": "done", "img_status": "✅ 완료",
+                            "post_link": _link,
+                            "completed_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                            "error": "",
+                        })
+                        save_queue(q2)
+                        _log_activity(item["keyword"], "✅ 성공", msg, _link)
+                        st.success(msg)
+                    else:
+                        q2[row_i].update({"status": "failed", "error": msg[:120]})
+                        save_queue(q2)
+                        _log_activity(item["keyword"], "❌ 실패", msg)
+                        st.error(f"즉시 발행 실패: {msg}")
+                    st.rerun()
+
+            # 큐 관리 버튼
+            st.markdown("<hr style='margin:.4rem 0'>", unsafe_allow_html=True)
+            mc1, mc2, mc3 = st.columns(3)
+            with mc1:
+                if st.button("✅ 완료 삭제", use_container_width=True, key="del_done"):
+                    save_queue([i for i in queue if i["status"] != "done"])
+                    st.rerun()
+            with mc2:
+                if st.button("🔁 실패 재시도", use_container_width=True, key="retry_fail"):
+                    for i in queue:
+                        if i["status"] == "failed":
+                            i.update({"status": "pending", "error": ""})
+                    save_queue(queue)
+                    st.rerun()
+            with mc3:
+                if st.button("🗑️ 전체 초기화", use_container_width=True, key="clear_all_q"):
+                    save_queue([])
+                    st.rerun()
+
+    # ── ② 오른쪽: 실시간 모니터링 패널 ─────────────────────────────
+    with right_col:
+        st.markdown("#### 현재 진행 상태")
+
+        if _BG_STATE["running"]:
+            stage      = _BG_STATE.get("stage", "")
+            cur_kw     = _BG_STATE.get("current_keyword", "")
+            next_at    = _BG_STATE.get("next_publish_at", 0.0)
+            ivl        = _BG_STATE.get("interval_secs", 3600)
+
+            _stage_label = {
+                "generating": "Gemini 원고 생성 중",
+                "image":      "Pexels 이미지 검색 중",
+                "publishing": "워드프레스 발행 중",
+                "waiting":    "다음 발행 대기 중",
+            }
+            stage_text = _stage_label.get(stage, "처리 중")
+
+            if cur_kw:
+                st.info(f"**현재 키워드:** {cur_kw}  \n**단계:** {stage_text}")
+            else:
+                st.info(f"**단계:** {stage_text}")
+
+            # 대기 중 프로그레스 바
+            if stage == "waiting" and next_at > 0:
+                elapsed  = time.time() - (next_at - ivl)
+                progress = min(elapsed / ivl, 1.0) if ivl > 0 else 1.0
+                remain   = max(int(next_at - time.time()), 0)
+                remain_m = remain // 60
+                remain_s = remain % 60
+                st.markdown(f"**다음 발행까지 {remain_m}분 {remain_s}초 남음**")
+                st.progress(progress)
+            elif stage in ("generating", "image", "publishing"):
+                st.progress(0.0, text="처리 중...")
+        else:
+            if _BG_STATE.get("activity_log"):
+                st.success("자동 발행 완료 (대기 중)")
+            else:
+                st.markdown(
+                    "<div style='color:#9ca3af;font-size:.9rem'>자동 발행이 시작되면 "
+                    "여기에 실시간 상태가 표시됩니다.</div>",
+                    unsafe_allow_html=True,
+                )
+
+        # ── 최근 활동 로그 ────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### 최근 활동 로그")
+        activity = _BG_STATE.get("activity_log", [])
+        if not activity:
+            st.markdown("<small style='color:#9ca3af'>아직 활동 내역이 없습니다.</small>",
+                        unsafe_allow_html=True)
+        else:
+            for entry in activity[:20]:
+                icon   = entry.get("status", "")
+                t_str  = entry.get("time", "")
+                kw_str = entry.get("keyword", "")[:20]
+                msg    = entry.get("message", "")[:60]
+                lnk    = entry.get("link", "")
+                if lnk:
+                    st.markdown(
+                        f"<small>{icon} <b>{t_str}</b> · {kw_str}  \n"
+                        f"{msg} — <a href='{lnk}' target='_blank'>글 보기</a></small>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        f"<small>{icon} <b>{t_str}</b> · {kw_str}  \n{msg}</small>",
+                        unsafe_allow_html=True,
+                    )
+
+    # ── 자동 폴링 ────────────────────────────────────────────────────
     if _BG_STATE["running"]:
-        st.success(
-            f"백그라운드 발행 실행 중 — 발행 간격 {interval_min}분 · "
-            f"대기 {n_pending}개 남음. 자동으로 화면이 갱신됩니다."
-        )
-        time.sleep(6)
+        time.sleep(5)
         st.rerun()
 
     st.stop()

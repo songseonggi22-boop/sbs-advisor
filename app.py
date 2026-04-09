@@ -7,15 +7,24 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 import io
+import os
 
 import pandas as pd
+import requests
 import streamlit as st
 import openpyxl
 import google.generativeai as genai
+import markdown as md_lib
+from dotenv import load_dotenv
 
 from design_engine import design, COURSE_ROLES, FIELDS
 from excel_loader import load_courses as _excel_load_courses
 from calculator import course_level_count
+
+load_dotenv()
+WP_URL          = os.getenv("WP_URL", "")
+WP_USERNAME     = os.getenv("WP_USERNAME", "")
+WP_APP_PASSWORD = os.getenv("WP_APP_PASSWORD", "")
 
 # ── 경로 ─────────────────────────────────────────────────────────────────────
 ROOT     = Path(__file__).parent
@@ -512,6 +521,53 @@ def build_excel(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 워드프레스 발행 유틸
+# ══════════════════════════════════════════════════════════════════════════════
+
+def extract_title(md_text: str) -> str:
+    """마크다운에서 첫 번째 H1 제목을 추출합니다."""
+    for line in md_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            return stripped[2:].strip()
+    return "SBS아카데미 블로그 포스트"
+
+
+def post_to_wordpress(title: str, content: str, status: str = "publish") -> dict:
+    """워드프레스 REST API로 포스트를 발행합니다."""
+    endpoint = f"{WP_URL.rstrip('/')}/wp-json/wp/v2/posts"
+    resp = requests.post(
+        endpoint,
+        auth=(WP_USERNAME, WP_APP_PASSWORD),
+        json={"title": title, "content": content, "status": status},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 블로그 자동화 기본 시스템 프롬프트
+# ══════════════════════════════════════════════════════════════════════════════
+
+BLOG_DEFAULT_PROMPT = """\
+# Role
+너는 네이버 SEO + 구글 SEO에 동시에 최적화된 한국어 블로그 콘텐츠 라이터이자 편집자다. 특히 네이버 블로그 모바일 화면에서 가독성이 좋아지도록 "짧은 문단 + 잦은 줄바꿈"을 기본 규칙으로 원고를 작성한다. 후기형(리뷰 톤)으로 자연스럽게 쓰되, 구조(H1~H4)와 맞춤법·띄어쓰기·오탈자 품질을 최상으로 유지한다.
+
+# Context
+사용자가 메인키워드 1개를 주면, 네이버 SEO(가독성/체류시간/목차/후기형 문장/키워드 분산) + 구글 SEO(명확한 헤딩 계층, 스캐너블 구성, Q&A)를 만족하는 글을 작성한다.
+- 이모티콘/이모지 완전 금지(숫자 이모지 포함 모든 유니코드 이모지 금지)
+- 본문에 마크다운 표 최소 1개 포함
+- 결과물은 바로 복사-붙여넣기 가능한 마크다운으로만 출력
+- 홍보 대상: SBS아카데미컴퓨터학원 대전점
+- 문단 규칙: 한 문단 1~3문장, 220자 이내 준수
+
+# Task
+- 구성: 제목(H1), 도입, 목차, 본문(H2/H3/H4), 표, Q&A(5개), 마무리, CTA(1개)
+- CTA는 마지막 줄에 "SBS아카데미컴퓨터학원 대전점" 문의 유도로 고정
+"""
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Session State 초기화
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -529,6 +585,12 @@ if "mentor_query" not in st.session_state:
     st.session_state.mentor_query: str = ""
 if "mentor_answer" not in st.session_state:
     st.session_state.mentor_answer: str = ""
+if "blog_keyword" not in st.session_state:
+    st.session_state.blog_keyword: str = ""
+if "blog_result" not in st.session_state:
+    st.session_state.blog_result: str = ""
+if "blog_system_prompt" not in st.session_state:
+    st.session_state.blog_system_prompt: str = ""  # 첫 렌더 시 BLOG_DEFAULT_PROMPT로 채움
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -537,6 +599,11 @@ if "mentor_answer" not in st.session_state:
 
 with st.sidebar:
     st.markdown("### 🎓 SBS아카데미 대전지점")
+    menu = st.radio(
+        "메뉴",
+        ["📄 패키지 견적서", "✍️ 블로그 자동화"],
+        label_visibility="collapsed",
+    )
     st.markdown("---")
 
     st.markdown("**👤 상담생 정보**")
@@ -653,6 +720,125 @@ st.markdown("""
   <p>수강료 계산 · 커리큘럼 설계 · 상담일지 자동 생성</p>
 </div>
 """, unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 블로그 자동화 탭
+# ══════════════════════════════════════════════════════════════════════════════
+
+if menu == "✍️ 블로그 자동화":
+    st.markdown("""
+<div style="background:linear-gradient(120deg,#064e3b 0%,#065f46 60%,#047857 100%);
+            padding:1.2rem 2rem;border-radius:14px;margin-bottom:1.4rem;
+            box-shadow:0 4px 24px rgba(5,150,105,.30);">
+  <h2 style="margin:0;color:#fff;font-size:1.4rem;font-weight:900;">블로그 자동화 · SEO 원고 생성</h2>
+  <p style="margin:.25rem 0 0;color:rgba(255,255,255,.80);font-size:.9rem;">
+    Gemini 1.5 Flash 기반 · 네이버/구글 SEO 최적화 · SBS아카데미컴퓨터학원 대전점
+  </p>
+</div>
+""", unsafe_allow_html=True)
+
+    # 시스템 프롬프트가 초기화되지 않은 경우 기본값 세팅
+    if not st.session_state.blog_system_prompt:
+        st.session_state.blog_system_prompt = BLOG_DEFAULT_PROMPT
+
+    with st.expander("⚙️ 시스템 프롬프트 설정 (고급)", expanded=False):
+        st.caption("아래 내용을 직접 수정하면 생성 스타일과 지침을 변경할 수 있습니다.")
+        st.text_area(
+            "시스템 프롬프트",
+            key="blog_system_prompt",
+            height=380,
+            label_visibility="collapsed",
+        )
+        if st.button("기본값으로 초기화", key="reset_prompt"):
+            st.session_state.blog_system_prompt = BLOG_DEFAULT_PROMPT
+            st.rerun()
+
+    st.markdown("**메인 키워드 입력**")
+    blog_keyword = st.text_input(
+        "메인 키워드",
+        value=st.session_state.blog_keyword,
+        placeholder="예: SBS아카데미 대전 영상편집 과정",
+        label_visibility="collapsed",
+    )
+
+    if st.button("✍️ 원고 생성", type="primary", use_container_width=True):
+        if not gemini_api_key:
+            st.warning("사이드바 하단에서 Gemini API Key를 입력해 주세요.")
+        elif not blog_keyword.strip():
+            st.warning("메인 키워드를 입력해 주세요.")
+        else:
+            st.session_state.blog_keyword = blog_keyword.strip()
+            with st.spinner("블로그 원고를 생성 중입니다... (30초~1분 소요)"):
+                try:
+                    genai.configure(api_key=gemini_api_key)
+                    model = genai.GenerativeModel(
+                        model_name="gemini-2.5-flash",
+                        system_instruction=st.session_state.blog_system_prompt,
+                    )
+                    response = model.generate_content(
+                        f"결과를 작성할 메인 키워드: {blog_keyword.strip()}"
+                    )
+                    st.session_state.blog_result = response.text
+                except Exception as e:
+                    err_str = str(e)
+                    if "429" in err_str or "quota" in err_str.lower():
+                        st.error("API 사용량이 초과되었습니다. 잠시 후 다시 시도해 주세요.")
+                    else:
+                        st.error(f"오류가 발생했습니다: {e}")
+
+    if st.session_state.blog_result:
+        st.markdown("---")
+        col_a, col_b = st.columns([1, 1])
+        with col_a:
+            st.markdown("**복사용 원고** (전체 선택 후 Ctrl+C)")
+        with col_b:
+            if st.button("✕ 원고 초기화", key="clear_blog"):
+                st.session_state.blog_result = ""
+                st.rerun()
+
+        st.text_area(
+            "원고",
+            value=st.session_state.blog_result,
+            height=500,
+            label_visibility="collapsed",
+        )
+
+        st.markdown("---")
+        st.markdown("**미리보기**")
+        st.markdown(st.session_state.blog_result)
+
+        # ── 워드프레스 발행 ───────────────────────────────────────────────────
+        st.markdown("---")
+        if WP_URL and WP_USERNAME and WP_APP_PASSWORD:
+            if st.button("🚀 워드프레스에 바로 발행하기", type="primary",
+                         use_container_width=True, key="wp_publish"):
+                with st.spinner("워드프레스에 발행 중..."):
+                    try:
+                        post_title   = extract_title(st.session_state.blog_result)
+                        html_content = md_lib.markdown(
+                            st.session_state.blog_result,
+                            extensions=["tables", "fenced_code"],
+                        )
+                        result = post_to_wordpress(post_title, html_content)
+                        post_link = result.get("link", "")
+                        st.success(
+                            f"발행 완료! 포스트 ID: {result.get('id')}  \n"
+                            f"[글 바로 보기]({post_link})"
+                        )
+                    except requests.HTTPError as e:
+                        st.error(f"발행 실패 (HTTP {e.response.status_code}): {e.response.text[:300]}")
+                    except Exception as e:
+                        st.error(f"발행 실패: {e}")
+        else:
+            st.info(
+                "`.env` 파일에 `WP_URL`, `WP_USERNAME`, `WP_APP_PASSWORD`를 설정하면 "
+                "워드프레스 발행 버튼이 활성화됩니다.",
+                icon="ℹ️",
+            )
+
+    st.stop()
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # AI 과정 설계 검색창

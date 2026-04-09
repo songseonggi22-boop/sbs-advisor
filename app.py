@@ -8,7 +8,10 @@ from datetime import datetime
 from pathlib import Path
 import io
 import base64
+import json
 import os
+import threading
+import time
 
 import pandas as pd
 import requests
@@ -26,11 +29,12 @@ load_dotenv()
 WP_URL          = os.getenv("WP_URL", "")
 WP_USERNAME     = os.getenv("WP_USERNAME", "")
 WP_APP_PASSWORD = os.getenv("WP_APP_PASSWORD", "")
-HF_API_KEY      = os.getenv("HF_API_KEY", "")  # Hugging Face — 이미지 생성용
+PEXELS_API_KEY  = os.getenv("PEXELS_API_KEY", "")  # Pexels — 실사 이미지 검색용
 
 # ── 경로 ─────────────────────────────────────────────────────────────────────
-ROOT     = Path(__file__).parent
-LOGS_DIR = ROOT / "logs"
+ROOT       = Path(__file__).parent
+LOGS_DIR   = ROOT / "logs"
+QUEUE_FILE = ROOT / "queue.json"
 LOGS_DIR.mkdir(exist_ok=True)
 
 # ── 페이지 설정 ───────────────────────────────────────────────────────────────
@@ -536,63 +540,151 @@ def extract_title(md_text: str) -> str:
 
 
 def extract_image_prompt(md_text: str) -> tuple[str, str]:
-    """[IMAGE_PROMPT]: 줄을 추출하고 나머지 정제된 텍스트를 반환합니다."""
+    """[IMAGE_KEYWORD]: 줄을 추출하고 나머지 정제된 텍스트를 반환합니다. (구버전 [IMAGE_PROMPT]: 도 호환)"""
     lines = md_text.splitlines()
-    image_prompt = ""
+    image_keyword = ""
     clean_lines = []
     for line in lines:
-        if line.strip().startswith("[IMAGE_PROMPT]:"):
-            image_prompt = line.strip()[len("[IMAGE_PROMPT]:"):].strip()
+        stripped = line.strip()
+        if stripped.startswith("[IMAGE_KEYWORD]:"):
+            image_keyword = stripped[len("[IMAGE_KEYWORD]:"):].strip()
+        elif stripped.startswith("[IMAGE_PROMPT]:"):
+            image_keyword = stripped[len("[IMAGE_PROMPT]:"):].strip()
         else:
             clean_lines.append(line)
-    return "\n".join(clean_lines).strip(), image_prompt
+    return "\n".join(clean_lines).strip(), image_keyword
 
 
-def generate_image_flux(prompt: str, hf_key: str) -> bytes:
-    """Hugging Face Inference API(FLUX.1-schnell)로 이미지를 생성합니다."""
-    url = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
-    resp = requests.post(
-        url,
-        headers={"Authorization": f"Bearer {hf_key}"},
-        json={"inputs": prompt},
-        timeout=120,
+def fetch_pexels_image(keyword: str, pexels_key: str) -> dict:
+    """Pexels API로 키워드에 맞는 고해상도 실사 이미지 정보를 반환합니다."""
+    resp = requests.get(
+        "https://api.pexels.com/v1/search",
+        headers={"Authorization": pexels_key},
+        params={"query": keyword, "per_page": 1, "orientation": "landscape"},
+        timeout=15,
     )
     resp.raise_for_status()
-    return resp.content
+    photos = resp.json().get("photos", [])
+    if not photos:
+        return {}
+    photo = photos[0]
+    return {
+        "url":          photo["src"]["large2x"],
+        "photographer": photo.get("photographer", "Pexels"),
+        "page_url":     photo.get("url", "https://www.pexels.com"),
+    }
 
 
-def upload_image_to_wp(image_bytes: bytes, filename: str) -> str:
-    """이미지를 워드프레스 미디어 라이브러리에 업로드하고 URL을 반환합니다."""
-    endpoint = f"{WP_URL.rstrip('/')}/wp-json/wp/v2/media"
-    token = base64.b64encode(
-        f"{WP_USERNAME}:{WP_APP_PASSWORD}".encode("utf-8")
-    ).decode("utf-8")
-    resp = requests.post(
-        endpoint,
-        headers={
-            "Authorization": f"Basic {token}",
-            "Content-Disposition": f'attachment; filename="{filename}"',
-            "Content-Type": "image/jpeg",
-        },
-        data=image_bytes,
-        timeout=60,
-    )
-    resp.raise_for_status()
-    return resp.json().get("source_url", "")
-
-
-def insert_image_html(html_content: str, img_url: str, alt: str) -> str:
-    """서론 첫 단락 바로 아래에 이미지 태그를 삽입합니다."""
+def insert_pexels_image_html(html_content: str, img_info: dict, alt: str) -> str:
+    """서론 첫 단락 바로 아래에 Pexels 이미지와 출처를 삽입합니다."""
+    url          = img_info.get("url", "")
+    photographer = img_info.get("photographer", "Pexels")
+    page_url     = img_info.get("page_url", "https://www.pexels.com")
+    if not url:
+        return html_content
     img_tag = (
         f'<figure style="text-align:center;margin:1.5rem 0;">'
-        f'<img src="{img_url}" alt="{alt}" '
-        f'style="max-width:100%;height:auto;border-radius:8px;">'
+        f'<img src="{url}" alt="{alt}" style="max-width:100%;height:auto;border-radius:8px;">'
+        f'<figcaption style="color:#6b7280;font-size:.8rem;margin-top:.4rem;">'
+        f'Photo by <a href="{page_url}" target="_blank" rel="noopener">{photographer}</a>'
+        f' on <a href="https://www.pexels.com" target="_blank" rel="noopener">Pexels</a>'
+        f'</figcaption>'
         f'</figure>'
     )
     idx = html_content.find("</p>")
     if idx != -1:
         return html_content[:idx + 4] + "\n" + img_tag + "\n" + html_content[idx + 4:]
     return img_tag + "\n" + html_content
+
+
+def insert_image_html(html_content: str, img_url: str, alt: str) -> str:
+    """(레거시 호환) insert_pexels_image_html 래퍼."""
+    return insert_pexels_image_html(html_content, {"url": img_url}, alt)
+
+
+# ── 큐 영속성 ──────────────────────────────────────────────────────────────────
+
+def load_queue() -> list:
+    """queue.json에서 키워드 큐를 로드합니다."""
+    try:
+        if QUEUE_FILE.exists():
+            return json.loads(QUEUE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return []
+
+
+def save_queue(queue: list) -> None:
+    """큐를 queue.json에 저장합니다."""
+    QUEUE_FILE.write_text(json.dumps(queue, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# ── 백그라운드 발행 스레드 ─────────────────────────────────────────────────────
+
+_BG_STATE: dict = {"running": False, "stop": False, "thread": None}
+
+
+def _bg_worker(interval_secs: int, gemini_key: str, pexels_key: str,
+               wp_status: str, include_img: bool) -> None:
+    """백그라운드 스레드: 큐에서 키워드를 순서대로 꺼내 발행합니다."""
+    _BG_STATE["running"] = True
+    _BG_STATE["stop"]    = False
+    try:
+        while not _BG_STATE["stop"]:
+            queue   = load_queue()
+            pending = [(i, item) for i, item in enumerate(queue) if item["status"] == "pending"]
+            if not pending:
+                break
+            idx, item = pending[0]
+            kw = item["keyword"]
+            queue[idx].update({"status": "processing",
+                                "started_at": datetime.now().strftime("%Y-%m-%d %H:%M")})
+            save_queue(queue)
+            try:
+                # 1. 원고 생성
+                genai.configure(api_key=gemini_key)
+                model = genai.GenerativeModel(
+                    model_name="gemini-2.5-flash",
+                    system_instruction=BLOG_DEFAULT_PROMPT,
+                )
+                clean_text, img_keyword = extract_image_prompt(
+                    model.generate_content(f"결과를 작성할 메인 키워드: {kw}").text
+                )
+                title = extract_title(clean_text)
+                # 2. Pexels 이미지
+                img_info   = {}
+                img_status = "—"
+                if include_img and pexels_key and img_keyword:
+                    try:
+                        img_info   = fetch_pexels_image(img_keyword, pexels_key)
+                        img_status = "✅ 완료" if img_info else "⚠️ 결과없음"
+                    except Exception:
+                        img_status = "❌ 실패"
+                # 3. HTML + 발행
+                html = md_lib.markdown(clean_text, extensions=["tables", "fenced_code"])
+                if img_info.get("url"):
+                    html = insert_pexels_image_html(html, img_info, kw)
+                wp_result = post_to_wordpress(title, html, status=wp_status)
+                queue = load_queue()
+                queue[idx].update({
+                    "status":       "done",
+                    "img_status":   img_status,
+                    "post_id":      wp_result.get("id"),
+                    "post_link":    wp_result.get("link", ""),
+                    "completed_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "error":        "",
+                })
+                save_queue(queue)
+            except Exception as e:
+                queue = load_queue()
+                queue[idx].update({"status": "failed", "error": str(e)[:120]})
+                save_queue(queue)
+            # 다음 항목 대기
+            if not _BG_STATE["stop"]:
+                if any(i["status"] == "pending" for i in load_queue()):
+                    time.sleep(interval_secs)
+    finally:
+        _BG_STATE["running"] = False
 
 
 def post_to_wordpress(title: str, content: str, status: str = "publish") -> dict:
@@ -635,11 +727,11 @@ BLOG_DEFAULT_PROMPT = """\
 - 구성: 제목(H1), 도입, 목차, 본문(H2/H3/H4), 표, Q&A(5개), 마무리, CTA(1개)
 - CTA는 마지막 줄에 "SBS아카데미컴퓨터학원 대전점" 문의 유도로 고정
 
-# Image Prompt
-원고 작성이 끝나면 반드시 본문 맨 마지막 줄에 아래 형식으로 이미지 프롬프트 1개를 추가한다.
+# Image Keyword
+원고 작성이 끝나면 반드시 본문 맨 마지막 줄에 아래 형식으로 Pexels 이미지 검색 키워드 1개를 추가한다.
 다른 내용과 반드시 한 줄 띄우고 출력한다:
-[IMAGE_PROMPT]: (글 전체 주제와 가장 잘 어울리는 photorealistic, professional quality 영어 이미지 프롬프트)
-예시: [IMAGE_PROMPT]: A professional photo of a student learning video editing at a modern computer desk, mentor explaining, bright natural light, photorealistic style
+[IMAGE_KEYWORD]: (글 전체 주제와 가장 잘 어울리는 영어 이미지 검색 단어 또는 짧은 구문 1개)
+예시: [IMAGE_KEYWORD]: graphic design student studying
 """
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -666,8 +758,10 @@ if "blog_result" not in st.session_state:
     st.session_state.blog_result: str = ""
 if "blog_system_prompt" not in st.session_state:
     st.session_state.blog_system_prompt: str = ""  # 첫 렌더 시 BLOG_DEFAULT_PROMPT로 채움
-if "image_prompt" not in st.session_state:
-    st.session_state.image_prompt: str = ""
+if "image_keyword" not in st.session_state:
+    st.session_state.image_keyword: str = ""
+if "pexels_img_info" not in st.session_state:
+    st.session_state.pexels_img_info: dict = {}
 if "generated_img_url" not in st.session_state:
     st.session_state.generated_img_url: str = ""
 if "dashboard_results" not in st.session_state:
@@ -784,11 +878,12 @@ with st.sidebar:
         placeholder="AIza...",
         help="Google AI Studio에서 발급한 Gemini API Key를 입력하세요.",
     )
-    hf_api_key = st.text_input(
-        "HuggingFace API Key (이미지 생성용)",
+    pexels_api_key = st.text_input(
+        "Pexels API Key (이미지 검색용)",
         type="password",
-        placeholder="hf_...",
-        help="huggingface.co/settings/tokens 에서 발급. FLUX 이미지 자동 생성에 사용됩니다.",
+        placeholder="BzAz...",
+        value=PEXELS_API_KEY,
+        help="pexels.com/api 에서 무료 발급. 실사 이미지 자동 삽입에 사용됩니다.",
     )
 
     st.markdown("---")
@@ -866,10 +961,11 @@ if menu == "✍️ 블로그 자동화":
                     response = model.generate_content(
                         f"결과를 작성할 메인 키워드: {blog_keyword.strip()}"
                     )
-                    clean_text, img_prompt = extract_image_prompt(response.text)
-                    st.session_state.blog_result = clean_text
-                    st.session_state.image_prompt = img_prompt
+                    clean_text, img_keyword = extract_image_prompt(response.text)
+                    st.session_state.blog_result       = clean_text
+                    st.session_state.image_keyword     = img_keyword
                     st.session_state.generated_img_url = ""
+                    st.session_state.pexels_img_info   = {}
                 except Exception as e:
                     err_str = str(e)
                     if "429" in err_str or "quota" in err_str.lower():
@@ -884,9 +980,10 @@ if menu == "✍️ 블로그 자동화":
             st.markdown("**복사용 원고** (전체 선택 후 Ctrl+C)")
         with col_b:
             if st.button("✕ 원고 초기화", key="clear_blog"):
-                st.session_state.blog_result = ""
-                st.session_state.image_prompt = ""
+                st.session_state.blog_result       = ""
+                st.session_state.image_keyword     = ""
                 st.session_state.generated_img_url = ""
+                st.session_state.pexels_img_info   = {}
                 st.rerun()
 
         st.text_area(
@@ -896,46 +993,49 @@ if menu == "✍️ 블로그 자동화":
             label_visibility="collapsed",
         )
 
-        # ── 이미지 생성 ────────────────────────────────────────────────────────
+        # ── Pexels 실사 이미지 검색 ───────────────────────────────────────────
         st.markdown("---")
-        st.markdown("**🎨 이미지 자동 생성**")
+        st.markdown("**📷 Pexels 실사 이미지 자동 삽입**")
 
-        if st.session_state.image_prompt:
-            st.caption(f"AI 추천 프롬프트: `{st.session_state.image_prompt}`")
+        if st.session_state.image_keyword:
+            st.caption(f"AI 추천 검색어: `{st.session_state.image_keyword}`")
         else:
-            st.caption("이미지 프롬프트가 없습니다. (원고 재생성 시 자동 추출됩니다)")
+            st.caption("이미지 검색 키워드가 없습니다. (원고 재생성 시 자동 추출됩니다)")
 
         img_col1, img_col2 = st.columns([3, 1])
         with img_col1:
-            custom_img_prompt = st.text_input(
-                "이미지 프롬프트 (직접 수정 가능)",
-                value=st.session_state.image_prompt,
-                key="custom_img_prompt",
+            custom_img_kw = st.text_input(
+                "Pexels 검색 키워드 (직접 수정 가능)",
+                value=st.session_state.image_keyword,
+                key="custom_img_kw",
                 label_visibility="collapsed",
             )
         with img_col2:
-            gen_img_btn = st.button("🎨 이미지 생성", use_container_width=True, key="gen_img")
+            search_img_btn = st.button("🔍 이미지 검색", use_container_width=True, key="search_img")
 
-        if gen_img_btn:
-            if not hf_api_key:
-                st.warning("사이드바에서 HuggingFace API Key를 입력해 주세요.")
-            elif not custom_img_prompt.strip():
-                st.warning("이미지 프롬프트를 입력해 주세요.")
+        if search_img_btn:
+            if not pexels_api_key:
+                st.warning("사이드바에서 Pexels API Key를 입력해 주세요.")
+            elif not custom_img_kw.strip():
+                st.warning("이미지 검색 키워드를 입력해 주세요.")
             else:
-                with st.spinner("FLUX로 이미지 생성 중... (30초~2분 소요)"):
+                with st.spinner("Pexels에서 이미지 검색 중..."):
                     try:
-                        img_bytes = generate_image_flux(custom_img_prompt.strip(), hf_api_key)
-                        safe_name = (st.session_state.blog_keyword[:20].replace(" ", "_") or "blog") + ".jpg"
-                        img_url = upload_image_to_wp(img_bytes, safe_name)
-                        st.session_state.generated_img_url = img_url
-                        st.success(f"이미지 생성 및 업로드 완료!")
-                    except requests.HTTPError as e:
-                        st.error(f"이미지 업로드 실패 (HTTP {e.response.status_code}): {e.response.text[:200]}")
+                        img_info = fetch_pexels_image(custom_img_kw.strip(), pexels_api_key)
+                        if img_info:
+                            st.session_state.pexels_img_info   = img_info
+                            st.session_state.generated_img_url = img_info["url"]
+                            st.success("이미지 검색 완료!")
+                        else:
+                            st.warning("검색 결과가 없습니다. 다른 키워드를 시도해 주세요.")
                     except Exception as e:
-                        st.error(f"이미지 생성 실패: {e}")
+                        st.error(f"이미지 검색 실패: {e}")
 
         if st.session_state.generated_img_url:
-            st.image(st.session_state.generated_img_url, caption="생성된 이미지 미리보기", use_container_width=True)
+            st.image(st.session_state.generated_img_url,
+                     caption="Pexels 이미지 미리보기", use_container_width=True)
+            if st.session_state.pexels_img_info.get("photographer"):
+                st.caption(f"Photo by {st.session_state.pexels_img_info['photographer']} on Pexels")
 
         # ── 미리보기 ───────────────────────────────────────────────────────────
         st.markdown("---")
@@ -956,10 +1056,10 @@ if menu == "✍️ 블로그 자동화":
                                 st.session_state.blog_result,
                                 extensions=["tables", "fenced_code"],
                             )
-                            if st.session_state.generated_img_url:
-                                html_content = insert_image_html(
+                            if st.session_state.pexels_img_info.get("url"):
+                                html_content = insert_pexels_image_html(
                                     html_content,
-                                    st.session_state.generated_img_url,
+                                    st.session_state.pexels_img_info,
                                     st.session_state.blog_keyword,
                                 )
                             result = post_to_wordpress(post_title, html_content, status="publish")
@@ -981,10 +1081,10 @@ if menu == "✍️ 블로그 자동화":
                                 st.session_state.blog_result,
                                 extensions=["tables", "fenced_code"],
                             )
-                            if st.session_state.generated_img_url:
-                                html_content = insert_image_html(
+                            if st.session_state.pexels_img_info.get("url"):
+                                html_content = insert_pexels_image_html(
                                     html_content,
-                                    st.session_state.generated_img_url,
+                                    st.session_state.pexels_img_info,
                                     st.session_state.blog_keyword,
                                 )
                             result = post_to_wordpress(post_title, html_content, status="draft")
@@ -1015,107 +1115,143 @@ if menu == "📅 예약 대시보드":
 <div style="background:linear-gradient(120deg,#1e1b4b 0%,#312e81 60%,#4338ca 100%);
             padding:1.2rem 2rem;border-radius:14px;margin-bottom:1.4rem;
             box-shadow:0 4px 24px rgba(67,56,202,.35);">
-  <h2 style="margin:0;color:#fff;font-size:1.4rem;font-weight:900;">글 자동 생성 및 예약 관리 대시보드</h2>
+  <h2 style="margin:0;color:#fff;font-size:1.4rem;font-weight:900;">글 자동 생성 · 예약 관리 대시보드</h2>
   <p style="margin:.25rem 0 0;color:rgba(255,255,255,.80);font-size:.9rem;">
-    키워드 목록 입력 → 글 생성 → 이미지 삽입 → 워드프레스 순차 발행
+    키워드 큐 관리 → Pexels 이미지 자동 삽입 → 워드프레스 백그라운드 발행
   </p>
 </div>
 """, unsafe_allow_html=True)
 
-    # ── 설정 패널 ─────────────────────────────────────────────────────────────
-    col_kw, col_opt = st.columns([3, 1])
-    with col_kw:
-        st.markdown("**키워드 목록** (한 줄에 하나씩)")
-        dash_kw_raw = st.text_area(
-            "키워드",
-            height=200,
-            placeholder="SBS아카데미 대전 영상편집 과정\nSBS아카데미 대전 포토샵 수업\n...",
-            label_visibility="collapsed",
-            key="dash_kw_input",
+    # ── 키워드 큐 관리 ────────────────────────────────────────────────────────
+    st.markdown("#### 키워드 큐 관리")
+    add_col1, add_col2 = st.columns([4, 1])
+    with add_col1:
+        new_kw = st.text_input("키워드 추가", placeholder="SBS아카데미 대전 영상편집 과정",
+                               label_visibility="collapsed", key="new_kw_input")
+    with add_col2:
+        if st.button("+ 큐에 추가", use_container_width=True, key="add_kw"):
+            if new_kw.strip():
+                q = load_queue()
+                q.append({"keyword": new_kw.strip(), "status": "pending",
+                           "added_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                           "img_status": "—", "post_id": None,
+                           "post_link": "", "error": ""})
+                save_queue(q)
+                st.rerun()
+
+    with st.expander("📋 여러 키워드 한 번에 추가"):
+        bulk_kw = st.text_area("키워드 목록 (한 줄에 하나씩)", height=140,
+                               placeholder="SBS아카데미 대전 포토샵 수업\nSBS아카데미 대전 웹디자인 취업\n...",
+                               key="bulk_kw")
+        if st.button("모두 큐에 추가", key="bulk_add"):
+            kws = [k.strip() for k in bulk_kw.strip().splitlines() if k.strip()]
+            if kws:
+                q = load_queue()
+                for kw in kws:
+                    q.append({"keyword": kw, "status": "pending",
+                               "added_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                               "img_status": "—", "post_id": None,
+                               "post_link": "", "error": ""})
+                save_queue(q)
+                st.rerun()
+
+    # ── 큐 현황 테이블 ────────────────────────────────────────────────────────
+    queue = load_queue()
+    n_total     = len(queue)
+    n_pending   = sum(1 for i in queue if i["status"] == "pending")
+    n_done      = sum(1 for i in queue if i["status"] == "done")
+    n_fail      = sum(1 for i in queue if i["status"] == "failed")
+    n_proc      = sum(1 for i in queue if i["status"] == "processing")
+
+    if queue:
+        st.markdown(
+            f"**큐 현황** — 전체 {n_total}개 &nbsp;|&nbsp; "
+            f"대기 {n_pending} · 처리중 {n_proc} · 완료 {n_done} · 실패 {n_fail}"
         )
-    with col_opt:
-        st.markdown("**옵션**")
-        dash_include_img = st.checkbox("🎨 이미지 자동 생성", value=True, key="dash_img")
-        dash_wp_status   = st.radio("발행 상태", ["publish", "draft"],
-                                    format_func=lambda x: "즉시 발행" if x == "publish" else "임시저장",
-                                    key="dash_wp_status")
-        st.caption("이미지 생성은 HF API Key 필요")
+        display_cols = ["keyword", "status", "img_status", "post_link", "error", "added_at"]
+        col_labels   = ["키워드", "상태", "이미지", "발행 링크", "오류", "추가 시각"]
+        df_q = pd.DataFrame(queue)[display_cols]
+        df_q.columns = col_labels
+        st.dataframe(df_q, use_container_width=True,
+                     height=min(38 * (len(df_q) + 2) + 10, 420))
 
-    if st.button("🚀 자동 발행 시작", type="primary", use_container_width=True, key="dash_start"):
-        dash_keywords = [k.strip() for k in dash_kw_raw.strip().splitlines() if k.strip()]
-        if not dash_keywords:
-            st.warning("키워드를 한 줄에 하나씩 입력해 주세요.")
-        elif not gemini_api_key:
-            st.warning("사이드바에서 Gemini API Key를 입력해 주세요.")
-        elif not (WP_URL and WP_USERNAME and WP_APP_PASSWORD):
-            st.warning(".env에 WordPress 정보(WP_URL, WP_USERNAME, WP_APP_PASSWORD)를 설정해 주세요.")
-        else:
-            results = []
-            progress_bar = st.progress(0, text="준비 중...")
-            status_box   = st.empty()
-            total = len(dash_keywords)
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            if st.button("✅ 완료 항목 삭제", use_container_width=True, key="del_done"):
+                save_queue([i for i in queue if i["status"] != "done"])
+                st.rerun()
+        with c2:
+            if st.button("🔁 실패 항목 재시도", use_container_width=True, key="retry_fail"):
+                for i in queue:
+                    if i["status"] == "failed":
+                        i.update({"status": "pending", "error": ""})
+                save_queue(queue)
+                st.rerun()
+        with c3:
+            if st.button("🗑️ 전체 초기화", use_container_width=True, key="clear_all_q"):
+                save_queue([])
+                st.rerun()
+    else:
+        st.info("큐가 비어 있습니다. 위에서 키워드를 추가해 주세요.")
 
-            for idx, kw in enumerate(dash_keywords):
-                progress_bar.progress((idx) / total, text=f"[{idx+1}/{total}] '{kw}' 처리 중...")
-                status_box.info(f"**[{idx+1}/{total}]** '{kw}' — 원고 생성 중...")
-                row = {
-                    "키워드": kw, "제목": "", "이미지 상태": "—",
-                    "발행 상태": "", "링크": "", "오류": "",
-                }
+    # ── 발행 설정 ─────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### 발행 설정")
+    opt_c1, opt_c2, opt_c3 = st.columns(3)
+    with opt_c1:
+        interval_min = st.slider(
+            "발행 간격", min_value=30, max_value=360, value=60, step=30,
+            format="%d분", key="dash_interval",
+            help="포스팅 1개 완료 후 다음 포스팅까지 대기 시간",
+        )
+    with opt_c2:
+        dash_include_img = st.checkbox("📷 Pexels 이미지 자동 삽입", value=True, key="dash_img")
+    with opt_c3:
+        dash_wp_status = st.radio(
+            "발행 상태", ["publish", "draft"],
+            format_func=lambda x: "즉시 발행" if x == "publish" else "임시저장",
+            key="dash_wp_status",
+        )
 
-                try:
-                    # 1. 원고 생성
-                    genai.configure(api_key=gemini_api_key)
-                    model = genai.GenerativeModel(
-                        model_name="gemini-2.5-flash",
-                        system_instruction=st.session_state.blog_system_prompt or BLOG_DEFAULT_PROMPT,
-                    )
-                    response   = model.generate_content(f"결과를 작성할 메인 키워드: {kw}")
-                    clean_text, img_prompt = extract_image_prompt(response.text)
-                    row["제목"] = extract_title(clean_text)
-
-                    # 2. 이미지 생성 & 업로드
-                    img_url = ""
-                    if dash_include_img and hf_api_key and img_prompt:
-                        status_box.info(f"**[{idx+1}/{total}]** '{kw}' — 이미지 생성 중...")
-                        try:
-                            img_bytes = generate_image_flux(img_prompt, hf_api_key)
-                            safe_name = kw[:20].replace(" ", "_") + f"_{idx}.jpg"
-                            img_url   = upload_image_to_wp(img_bytes, safe_name)
-                            row["이미지 상태"] = "✅ 완료"
-                        except Exception as img_e:
-                            row["이미지 상태"] = f"❌ {str(img_e)[:40]}"
-                    elif dash_include_img and not hf_api_key:
-                        row["이미지 상태"] = "⚠️ HF Key 없음"
-
-                    # 3. HTML 변환 + 이미지 삽입 + 발행
-                    status_box.info(f"**[{idx+1}/{total}]** '{kw}' — 워드프레스 발행 중...")
-                    html_content = md_lib.markdown(clean_text, extensions=["tables", "fenced_code"])
-                    if img_url:
-                        html_content = insert_image_html(html_content, img_url, kw)
-                    wp_result = post_to_wordpress(row["제목"], html_content, status=dash_wp_status)
-                    row["발행 상태"] = "✅ 발행완료" if dash_wp_status == "publish" else "📝 임시저장"
-                    row["링크"] = wp_result.get("link", "")
-
-                except Exception as e:
-                    row["오류"] = str(e)[:80]
-                    row["발행 상태"] = "❌ 실패"
-
-                results.append(row)
-                progress_bar.progress((idx + 1) / total, text=f"[{idx+1}/{total}] 완료")
-
-            st.session_state.dashboard_results = results
-            status_box.success(f"모든 작업 완료! 총 {total}개 키워드 처리")
-
-    # ── 결과 테이블 ───────────────────────────────────────────────────────────
-    if st.session_state.dashboard_results:
-        st.markdown("---")
-        st.markdown("**발행 결과**")
-        df_dash = pd.DataFrame(st.session_state.dashboard_results)
-        st.dataframe(df_dash, use_container_width=True, height=min(38 * (len(df_dash) + 2) + 10, 500))
-        if st.button("🗑️ 결과 초기화", key="clear_dash"):
-            st.session_state.dashboard_results = []
+    # ── 제어 버튼 ─────────────────────────────────────────────────────────────
+    st.markdown("---")
+    btn_c1, btn_c2, btn_c3 = st.columns(3)
+    with btn_c1:
+        start_disabled = _BG_STATE["running"] or n_pending == 0
+        if st.button("🚀 자동 발행 시작", type="primary",
+                     use_container_width=True, key="dash_start",
+                     disabled=start_disabled):
+            if not gemini_api_key:
+                st.warning("사이드바에서 Gemini API Key를 입력해 주세요.")
+            elif not (WP_URL and WP_USERNAME and WP_APP_PASSWORD):
+                st.warning(".env에 WordPress 정보를 설정해 주세요.")
+            else:
+                t = threading.Thread(
+                    target=_bg_worker,
+                    args=(interval_min * 60, gemini_api_key,
+                          pexels_api_key, dash_wp_status, dash_include_img),
+                    daemon=True,
+                )
+                _BG_STATE["thread"] = t
+                t.start()
+                st.rerun()
+    with btn_c2:
+        if st.button("⏹ 중지", use_container_width=True, key="dash_stop",
+                     disabled=not _BG_STATE["running"]):
+            _BG_STATE["stop"] = True
             st.rerun()
+    with btn_c3:
+        if st.button("🔄 새로고침", use_container_width=True, key="dash_refresh"):
+            st.rerun()
+
+    # ── 실행 상태 표시 & 자동 폴링 ───────────────────────────────────────────
+    if _BG_STATE["running"]:
+        st.success(
+            f"백그라운드 발행 실행 중 — 발행 간격 {interval_min}분 · "
+            f"대기 {n_pending}개 남음. 자동으로 화면이 갱신됩니다."
+        )
+        time.sleep(6)
+        st.rerun()
 
     st.stop()
 

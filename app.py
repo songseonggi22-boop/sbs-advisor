@@ -1363,6 +1363,22 @@ if menu == "📅 예약 대시보드":
             value=True, key="gen_featured",
             disabled=not st.session_state.get("gen_img", True),
         )
+        st.markdown("---")
+        st.markdown("**글 생성 간격 설정**")
+        gen_interval_min = st.slider(
+            "키워드 간 생성 간격 (분)",
+            min_value=1, max_value=100, value=5, step=1,
+            key="gen_interval_min",
+            help="각 키워드 원고 생성 사이의 대기 시간. Gemini API 할당량 초과 방지에도 활용됩니다.",
+        )
+        # 예상 종료 시간 계산
+        _kw_count = len([k for k in st.session_state.get("dash_kw_input", "").splitlines() if k.strip()])
+        _pending_count = sum(1 for d in st.session_state.wp_drafts if d["status"] == "pending")
+        _gen_target = max(_kw_count, _pending_count)
+        if _gen_target > 1:
+            _est_finish = _dt.datetime.now() + _dt.timedelta(minutes=gen_interval_min * (_gen_target - 1))
+            st.info(f"예상 종료 시간: **{_est_finish.strftime('%m/%d %H:%M')}**  \n"
+                    f"({_gen_target}개 × {gen_interval_min}분 간격)")
 
     gen_btn, clear_btn = st.columns([2, 1])
     with gen_btn:
@@ -1390,55 +1406,105 @@ if menu == "📅 예약 대시보드":
             if not new_kws:
                 st.info("입력한 키워드가 이미 목록에 모두 있습니다.")
             else:
-                prog_bar = st.progress(0, text="원고 생성 준비 중...")
-                total_new = len(new_kws)
+                prog_bar    = st.progress(0, text="원고 생성 준비 중...")
+                status_text = st.empty()
+                total_new   = len(new_kws)
+                genai.configure(api_key=gemini_api_key)
+                model = genai.GenerativeModel(
+                    model_name="gemini-2.5-flash",
+                    system_instruction=BLOG_DEFAULT_PROMPT,
+                )
+
                 for gi, kw in enumerate(new_kws):
-                    prog_bar.progress(gi / total_new,
+                    prog_ratio = gi / total_new
+                    prog_bar.progress(prog_ratio,
                                       text=f"({gi+1}/{total_new}) '{kw}' 원고 생성 중...")
-                    try:
-                        genai.configure(api_key=gemini_api_key)
-                        model = genai.GenerativeModel(
-                            model_name="gemini-2.5-flash",
-                            system_instruction=BLOG_DEFAULT_PROMPT,
-                        )
-                        raw = model.generate_content(
-                            f"결과를 작성할 메인 키워드: {kw}"
-                        ).text
-                        clean_text, img_keyword = extract_image_prompt(raw)
-                        title = extract_title(clean_text)
-                        html  = md_lib.markdown(clean_text, extensions=["tables", "fenced_code"])
-                        html  = fix_heading_levels(html)
+                    status_text.markdown(
+                        f"<small style='color:#6b7280'>현재: <b>{kw}</b></small>",
+                        unsafe_allow_html=True,
+                    )
 
-                        img_info = {}
-                        if gen_include_img and pexels_api_key and img_keyword:
-                            try:
-                                img_info = fetch_pexels_image(img_keyword, pexels_api_key)
-                            except Exception:
-                                pass
+                    # ── Smart Retry (429 / quota 에러 자동 재시도) ────────────
+                    _MAX_RETRIES  = 4
+                    _retry_delays = [10, 30, 60, 120]   # 초 단위
+                    _last_err     = None
+                    raw           = None
+                    for _attempt in range(_MAX_RETRIES):
+                        try:
+                            raw = model.generate_content(
+                                f"결과를 작성할 메인 키워드: {kw}"
+                            ).text
+                            break
+                        except Exception as _e:
+                            _last_err  = _e
+                            _err_str   = str(_e).lower()
+                            _is_quota  = ("429" in _err_str or "quota" in _err_str
+                                          or "resource_exhausted" in _err_str)
+                            if _is_quota and _attempt < _MAX_RETRIES - 1:
+                                _wait = _retry_delays[_attempt]
+                                status_text.warning(
+                                    f"API 할당량 초과 — {_wait}초 후 재시도합니다. "
+                                    f"({_attempt+1}/{_MAX_RETRIES})"
+                                )
+                                time.sleep(_wait)
+                            else:
+                                break   # quota 외 에러 또는 재시도 소진
 
+                    if raw is None:
                         st.session_state.wp_drafts.append({
-                            "keyword":      kw,
-                            "title":        title,
-                            "content_html": html,
-                            "img_info":     img_info,
-                            "img_keyword":  img_keyword,
+                            "keyword": kw, "title": f"생성 실패: {kw}",
+                            "content_html": "", "img_info": {}, "img_keyword": "",
                             "set_featured": gen_set_featured,
-                            "status":       "pending",
-                            "wp_link":      "",
-                            "error":        "",
+                            "status": "failed", "wp_link": "",
+                            "error": str(_last_err)[:120],
                         })
-                    except Exception as e:
-                        st.session_state.wp_drafts.append({
-                            "keyword":      kw,
-                            "title":        f"생성 실패: {kw}",
-                            "content_html": "",
-                            "img_info":     {},
-                            "img_keyword":  "",
-                            "set_featured": gen_set_featured,
-                            "status":       "failed",
-                            "wp_link":      "",
-                            "error":        str(e)[:120],
-                        })
+                    else:
+                        try:
+                            clean_text, img_keyword = extract_image_prompt(raw)
+                            title = extract_title(clean_text)
+                            html  = md_lib.markdown(clean_text, extensions=["tables", "fenced_code"])
+                            html  = fix_heading_levels(html)
+
+                            img_info = {}
+                            if gen_include_img and pexels_api_key and img_keyword:
+                                try:
+                                    img_info = fetch_pexels_image(img_keyword, pexels_api_key)
+                                except Exception:
+                                    pass
+
+                            st.session_state.wp_drafts.append({
+                                "keyword":      kw,
+                                "title":        title,
+                                "content_html": html,
+                                "img_info":     img_info,
+                                "img_keyword":  img_keyword,
+                                "set_featured": gen_set_featured,
+                                "status":       "pending",
+                                "wp_link":      "",
+                                "error":        "",
+                            })
+                        except Exception as e:
+                            st.session_state.wp_drafts.append({
+                                "keyword": kw, "title": f"생성 실패: {kw}",
+                                "content_html": "", "img_info": {}, "img_keyword": "",
+                                "set_featured": gen_set_featured,
+                                "status": "failed", "wp_link": "",
+                                "error": str(e)[:120],
+                            })
+
+                    # ── 다음 키워드 전 대기 (마지막은 생략) ──────────────────
+                    if gi < total_new - 1:
+                        _sleep_secs = gen_interval_min * 60
+                        for _sc in range(_sleep_secs, 0, -1):
+                            status_text.markdown(
+                                f"<small style='color:#6b7280'>"
+                                f"다음 키워드까지 <b>{_sc}초</b> 대기 중... "
+                                f"(간격 {gen_interval_min}분)</small>",
+                                unsafe_allow_html=True,
+                            )
+                            time.sleep(1)
+
+                status_text.empty()
                 prog_bar.progress(1.0, text=f"완료! {total_new}개 원고 생성됨")
                 st.rerun()
 
@@ -1465,27 +1531,39 @@ if menu == "📅 예약 대시보드":
         with bc2:
             bulk_start_time = st.time_input(
                 "시작 시간",
-                value=(_dt.datetime.now() + _dt.timedelta(hours=1)).replace(
-                    minute=0, second=0, microsecond=0
+                value=(_dt.datetime.now() + _dt.timedelta(minutes=gen_interval_min)).replace(
+                    second=0, microsecond=0
                 ).time(),
-                step=1800,
+                step=60,
                 key="bulk_start_time",
             )
         with bc3:
-            bulk_interval_h = st.number_input(
-                "간격 (시간)",
-                min_value=1, max_value=24, value=2, step=1,
-                key="bulk_interval_h",
+            bulk_interval_min = st.number_input(
+                "예약 간격 (분)",
+                min_value=1, max_value=1440, value=gen_interval_min, step=1,
+                key="bulk_interval_min",
+                help="글 생성 간격 슬라이더 값이 기본으로 적용됩니다.",
             )
+            # 예상 종료 시간 미리보기
+            _n_pend = sum(1 for d in drafts if d["status"] == "pending")
+            if _n_pend > 1:
+                _end_preview = (
+                    _dt.datetime.combine(bulk_start_date, bulk_start_time)
+                    + _dt.timedelta(minutes=bulk_interval_min * (_n_pend - 1))
+                )
+                _today_str = "오늘" if _end_preview.date() == _dt.date.today() else _end_preview.strftime("%m/%d")
+                st.caption(f"예상 종료: **{_today_str} {_end_preview.strftime('%H:%M')}**")
         with bc4:
             st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
             if st.button("자동 배정", use_container_width=True, key="bulk_assign"):
                 start_dt = _dt.datetime.combine(bulk_start_date, bulk_start_time)
+                _pending_idx = 0
                 for bi, d in enumerate(drafts):
                     if d["status"] == "pending":
-                        assigned = start_dt + _dt.timedelta(hours=bulk_interval_h * bi)
+                        assigned = start_dt + _dt.timedelta(minutes=bulk_interval_min * _pending_idx)
                         st.session_state[f"sched_date_{bi}"] = assigned.date()
                         st.session_state[f"sched_time_{bi}"] = assigned.time()
+                        _pending_idx += 1
                 st.rerun()
 
     # ── 목록 헤더 ─────────────────────────────────────────────────────
@@ -1494,9 +1572,24 @@ if menu == "📅 예약 대시보드":
         h.markdown(f"**{lbl}**")
     st.markdown("<hr style='margin:.4rem 0'>", unsafe_allow_html=True)
 
+    # ── 전체 예상 종료 시간 배너 ─────────────────────────────────────
+    _all_sched_times = []
+    for _ci in range(len(drafts)):
+        _sd = st.session_state.get(f"sched_date_{_ci}")
+        _st2 = st.session_state.get(f"sched_time_{_ci}")
+        if _sd and _st2:
+            _all_sched_times.append(_dt.datetime.combine(_sd, _st2))
+    if _all_sched_times:
+        _last_sched = max(_all_sched_times)
+        _today_str  = "오늘" if _last_sched.date() == _dt.date.today() else _last_sched.strftime("%m/%d")
+        st.success(
+            f"예상 종료 시간: **{_today_str} {_last_sched.strftime('%H:%M')}** "
+            f"({len(drafts)}개 글, 간격 {gen_interval_min}분 기준)"
+        )
+
     # ── 각 원고 행 ────────────────────────────────────────────────────
-    _default_start = (_dt.datetime.now() + _dt.timedelta(hours=1)).replace(
-        minute=0, second=0, microsecond=0
+    _default_start = (_dt.datetime.now() + _dt.timedelta(minutes=gen_interval_min)).replace(
+        second=0, microsecond=0
     )
     for di, draft in enumerate(drafts):
         cols = st.columns([3, 3, 2, 2, 1])
@@ -1518,7 +1611,7 @@ if menu == "📅 예약 대시보드":
                              unsafe_allow_html=True)
 
         # 예약 날짜 / 시간
-        default_dt = _default_start + _dt.timedelta(hours=2 * di)
+        default_dt = _default_start + _dt.timedelta(minutes=gen_interval_min * di)
         sched_date = cols[2].date_input(
             "날짜",
             value=st.session_state.get(f"sched_date_{di}", default_dt.date()),
@@ -1528,7 +1621,7 @@ if menu == "📅 예약 대시보드":
         sched_time = cols[3].time_input(
             "시간",
             value=st.session_state.get(f"sched_time_{di}", default_dt.time()),
-            step=1800,
+            step=60,
             key=f"sched_time_{di}",
             label_visibility="collapsed",
         )

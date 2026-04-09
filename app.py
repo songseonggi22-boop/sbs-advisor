@@ -7,6 +7,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 import io
+import base64
 import os
 
 import pandas as pd
@@ -534,11 +535,18 @@ def extract_title(md_text: str) -> str:
 
 
 def post_to_wordpress(title: str, content: str, status: str = "publish") -> dict:
-    """워드프레스 REST API로 포스트를 발행합니다."""
+    """워드프레스 REST API로 포스트를 발행합니다. (Basic Auth + JSON)"""
     endpoint = f"{WP_URL.rstrip('/')}/wp-json/wp/v2/posts"
+    token = base64.b64encode(
+        f"{WP_USERNAME}:{WP_APP_PASSWORD}".encode("utf-8")
+    ).decode("utf-8")
+    headers = {
+        "Authorization": f"Basic {token}",
+        "Content-Type": "application/json",
+    }
     resp = requests.post(
         endpoint,
-        auth=(WP_USERNAME, WP_APP_PASSWORD),
+        headers=headers,
         json={"title": title, "content": content, "status": status},
         timeout=30,
     )

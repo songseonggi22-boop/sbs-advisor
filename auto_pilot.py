@@ -12,6 +12,7 @@ auto_pilot.py — SBS아카데미 블로그 자동 발행 파일럿
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import time
@@ -91,11 +92,18 @@ def generate_post(keyword: str) -> str:
 
 
 def post_to_wordpress(title: str, content: str, status: str = "publish") -> dict:
-    """워드프레스 REST API로 포스트를 발행합니다."""
+    """워드프레스 REST API로 포스트를 발행합니다. (Basic Auth + JSON)"""
     endpoint = f"{WP_URL.rstrip('/')}/wp-json/wp/v2/posts"
+    token = base64.b64encode(
+        f"{WP_USERNAME}:{WP_APP_PASSWORD}".encode("utf-8")
+    ).decode("utf-8")
+    headers = {
+        "Authorization": f"Basic {token}",
+        "Content-Type": "application/json",
+    }
     resp = requests.post(
         endpoint,
-        auth=(WP_USERNAME, WP_APP_PASSWORD),
+        headers=headers,
         json={"title": title, "content": content, "status": status},
         timeout=30,
     )

@@ -808,8 +808,12 @@ def _bg_worker(interval_secs: int, gemini_key: str, pexels_key: str,
 
 
 def post_to_wordpress(title: str, content: str, status: str = "publish",
-                      featured_media_id: int = 0) -> dict:
-    """워드프레스 REST API로 포스트를 발행합니다. (Basic Auth + JSON)"""
+                      featured_media_id: int = 0, date_str: str = "") -> dict:
+    """워드프레스 REST API로 포스트를 발행합니다. (Basic Auth + JSON)
+
+    date_str: ISO 8601 로컬 시간 문자열, 예) "2024-01-15T14:00:00"
+              status="future" 와 함께 사용하면 워드프레스 예약 발행이 됩니다.
+    """
     endpoint = f"{WP_URL.rstrip('/')}/wp-json/wp/v2/posts"
     token = base64.b64encode(
         f"{WP_USERNAME}:{WP_APP_PASSWORD}".encode("utf-8")
@@ -821,6 +825,8 @@ def post_to_wordpress(title: str, content: str, status: str = "publish",
     payload: dict = {"title": title, "content": content, "status": status}
     if featured_media_id:
         payload["featured_media"] = featured_media_id
+    if date_str:
+        payload["date"] = date_str          # WP 사이트 로컬 시간 기준
     resp = requests.post(
         endpoint,
         headers=headers,
@@ -930,6 +936,11 @@ if "generated_img_url" not in st.session_state:
     st.session_state.generated_img_url: str = ""
 if "dashboard_results" not in st.session_state:
     st.session_state.dashboard_results: list = []
+if "wp_drafts" not in st.session_state:
+    # 원고 선생성 목록
+    # 각 항목: {keyword, title, content_html, img_info, img_keyword,
+    #           status: "pending"|"sent"|"failed", wp_link, error}
+    st.session_state.wp_drafts: list = []
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1314,7 +1325,7 @@ if menu == "✍️ 블로그 자동화":
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 예약 대시보드 탭
+# 예약 대시보드 탭 — 워드프레스 네이티브 예약 발행
 # ══════════════════════════════════════════════════════════════════════════════
 
 if menu == "📅 예약 대시보드":
@@ -1322,289 +1333,330 @@ if menu == "📅 예약 대시보드":
 <div style="background:linear-gradient(120deg,#1e1b4b 0%,#312e81 60%,#4338ca 100%);
             padding:1.2rem 2rem;border-radius:14px;margin-bottom:1.4rem;
             box-shadow:0 4px 24px rgba(67,56,202,.35);">
-  <h2 style="margin:0;color:#fff;font-size:1.4rem;font-weight:900;">글 자동 생성 · 예약 관리 대시보드</h2>
+  <h2 style="margin:0;color:#fff;font-size:1.4rem;font-weight:900;">워드프레스 예약 발행 시스템</h2>
   <p style="margin:.25rem 0 0;color:rgba(255,255,255,.80);font-size:.9rem;">
-    키워드 큐 관리 → Pexels 이미지 자동 삽입 → 워드프레스 백그라운드 발행
+    키워드 입력 → 원고 선생성 → 예약 시간 설정 → 워드프레스 '예약됨'으로 전송
   </p>
 </div>
 """, unsafe_allow_html=True)
 
     # ════════════════════════════════════════════════════════════════
-    # 2단 레이아웃: 왼쪽(큐+설정) / 오른쪽(실시간 모니터링)
+    # 상단: 키워드 입력 + 생성 옵션
     # ════════════════════════════════════════════════════════════════
-    left_col, right_col = st.columns([3, 2], gap="large")
+    import datetime as _dt
 
-    # ── ① 왼쪽: 키워드 큐 관리 ──────────────────────────────────────
-    with left_col:
-        st.markdown("#### 키워드 큐 관리")
+    top_left, top_right = st.columns([3, 2], gap="large")
+    with top_left:
+        st.markdown("#### 키워드 입력")
+        kw_input = st.text_area(
+            "키워드 목록 (한 줄에 하나씩)",
+            height=140,
+            placeholder="SBS아카데미 대전 포토샵 수업\nSBS아카데미 대전 영상편집 취업\n...",
+            key="dash_kw_input",
+        )
 
-        # 키워드 단일 추가
-        add_col1, add_col2 = st.columns([4, 1])
-        with add_col1:
-            new_kw = st.text_input("키워드 추가", placeholder="SBS아카데미 대전 영상편집 과정",
-                                   label_visibility="collapsed", key="new_kw_input")
-        with add_col2:
-            if st.button("+ 추가", use_container_width=True, key="add_kw"):
-                if new_kw.strip():
-                    q = load_queue()
-                    q.append({"keyword": new_kw.strip(), "status": "pending",
-                               "added_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                               "img_status": "—", "post_id": None,
-                               "post_link": "", "error": ""})
-                    save_queue(q)
-                    st.rerun()
+    with top_right:
+        st.markdown("#### 원고 생성 옵션")
+        gen_include_img = st.checkbox("📷 Pexels 이미지 자동 검색", value=True, key="gen_img")
+        gen_set_featured = st.checkbox(
+            "🖼️ 대표 이미지(Featured Image)로 등록",
+            value=True, key="gen_featured",
+            disabled=not st.session_state.get("gen_img", True),
+        )
 
-        with st.expander("📋 여러 키워드 한 번에 추가"):
-            bulk_kw = st.text_area("키워드 목록 (한 줄에 하나씩)", height=120,
-                                   placeholder="SBS아카데미 대전 포토샵 수업\nSBS아카데미 대전 웹디자인 취업\n...",
-                                   key="bulk_kw")
-            if st.button("모두 큐에 추가", key="bulk_add"):
-                kws = [k.strip() for k in bulk_kw.strip().splitlines() if k.strip()]
-                if kws:
-                    q = load_queue()
-                    for kw in kws:
-                        q.append({"keyword": kw, "status": "pending",
-                                   "added_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                                   "img_status": "—", "post_id": None,
-                                   "post_link": "", "error": ""})
-                    save_queue(q)
-                    st.rerun()
+    gen_btn, clear_btn = st.columns([2, 1])
+    with gen_btn:
+        do_generate = st.button(
+            "✍️ 원고 일괄 생성",
+            type="primary", use_container_width=True, key="gen_all",
+            disabled=not gemini_api_key,
+        )
+    with clear_btn:
+        if st.button("🗑️ 목록 초기화", use_container_width=True, key="clear_drafts"):
+            st.session_state.wp_drafts = []
+            st.rerun()
 
-        # 큐 현황 카운터
-        queue    = load_queue()
-        n_total  = len(queue)
-        n_pending = sum(1 for i in queue if i["status"] == "pending")
-        n_done   = sum(1 for i in queue if i["status"] == "done")
-        n_fail   = sum(1 for i in queue if i["status"] == "failed")
-        n_proc   = sum(1 for i in queue if i["status"] == "processing")
+    if not gemini_api_key:
+        st.warning("사이드바에서 Gemini API Key를 먼저 입력해 주세요.")
 
-        st.markdown(
-            f"<small>전체 **{n_total}** &nbsp;·&nbsp; "
-            f"대기 **{n_pending}** &nbsp;·&nbsp; "
-            f"처리중 **{n_proc}** &nbsp;·&nbsp; "
-            f"완료 **{n_done}** &nbsp;·&nbsp; "
-            f"실패 **{n_fail}**</small>",
+    # ── 원고 일괄 생성 ────────────────────────────────────────────────
+    if do_generate:
+        kws = [k.strip() for k in kw_input.strip().splitlines() if k.strip()]
+        if not kws:
+            st.warning("키워드를 한 줄에 하나씩 입력해 주세요.")
+        else:
+            existing_kws = {d["keyword"] for d in st.session_state.wp_drafts}
+            new_kws = [k for k in kws if k not in existing_kws]
+            if not new_kws:
+                st.info("입력한 키워드가 이미 목록에 모두 있습니다.")
+            else:
+                prog_bar = st.progress(0, text="원고 생성 준비 중...")
+                total_new = len(new_kws)
+                for gi, kw in enumerate(new_kws):
+                    prog_bar.progress(gi / total_new,
+                                      text=f"({gi+1}/{total_new}) '{kw}' 원고 생성 중...")
+                    try:
+                        genai.configure(api_key=gemini_api_key)
+                        model = genai.GenerativeModel(
+                            model_name="gemini-2.5-flash",
+                            system_instruction=BLOG_DEFAULT_PROMPT,
+                        )
+                        raw = model.generate_content(
+                            f"결과를 작성할 메인 키워드: {kw}"
+                        ).text
+                        clean_text, img_keyword = extract_image_prompt(raw)
+                        title = extract_title(clean_text)
+                        html  = md_lib.markdown(clean_text, extensions=["tables", "fenced_code"])
+                        html  = fix_heading_levels(html)
+
+                        img_info = {}
+                        if gen_include_img and pexels_api_key and img_keyword:
+                            try:
+                                img_info = fetch_pexels_image(img_keyword, pexels_api_key)
+                            except Exception:
+                                pass
+
+                        st.session_state.wp_drafts.append({
+                            "keyword":      kw,
+                            "title":        title,
+                            "content_html": html,
+                            "img_info":     img_info,
+                            "img_keyword":  img_keyword,
+                            "set_featured": gen_set_featured,
+                            "status":       "pending",
+                            "wp_link":      "",
+                            "error":        "",
+                        })
+                    except Exception as e:
+                        st.session_state.wp_drafts.append({
+                            "keyword":      kw,
+                            "title":        f"생성 실패: {kw}",
+                            "content_html": "",
+                            "img_info":     {},
+                            "img_keyword":  "",
+                            "set_featured": gen_set_featured,
+                            "status":       "failed",
+                            "wp_link":      "",
+                            "error":        str(e)[:120],
+                        })
+                prog_bar.progress(1.0, text=f"완료! {total_new}개 원고 생성됨")
+                st.rerun()
+
+    # ════════════════════════════════════════════════════════════════
+    # 발행 대기 목록 + 예약 시간 설정
+    # ════════════════════════════════════════════════════════════════
+    drafts = st.session_state.wp_drafts
+    if not drafts:
+        st.info("위에서 키워드를 입력하고 '원고 일괄 생성'을 눌러 주세요.")
+        st.stop()
+
+    st.markdown("---")
+    st.markdown("#### 발행 대기 목록")
+
+    # ── 일괄 시간 설정 ────────────────────────────────────────────────
+    with st.expander("⏰ 일괄 시간 자동 배정", expanded=True):
+        bc1, bc2, bc3, bc4 = st.columns([2, 2, 2, 1])
+        with bc1:
+            bulk_start_date = st.date_input(
+                "시작 날짜",
+                value=_dt.date.today(),
+                key="bulk_start_date",
+            )
+        with bc2:
+            bulk_start_time = st.time_input(
+                "시작 시간",
+                value=(_dt.datetime.now() + _dt.timedelta(hours=1)).replace(
+                    minute=0, second=0, microsecond=0
+                ).time(),
+                step=1800,
+                key="bulk_start_time",
+            )
+        with bc3:
+            bulk_interval_h = st.number_input(
+                "간격 (시간)",
+                min_value=1, max_value=24, value=2, step=1,
+                key="bulk_interval_h",
+            )
+        with bc4:
+            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+            if st.button("자동 배정", use_container_width=True, key="bulk_assign"):
+                start_dt = _dt.datetime.combine(bulk_start_date, bulk_start_time)
+                for bi, d in enumerate(drafts):
+                    if d["status"] == "pending":
+                        assigned = start_dt + _dt.timedelta(hours=bulk_interval_h * bi)
+                        st.session_state[f"sched_date_{bi}"] = assigned.date()
+                        st.session_state[f"sched_time_{bi}"] = assigned.time()
+                st.rerun()
+
+    # ── 목록 헤더 ─────────────────────────────────────────────────────
+    hdr = st.columns([3, 3, 2, 2, 1])
+    for h, lbl in zip(hdr, ["키워드 / 제목", "이미지", "예약 날짜", "예약 시간", "상태"]):
+        h.markdown(f"**{lbl}**")
+    st.markdown("<hr style='margin:.4rem 0'>", unsafe_allow_html=True)
+
+    # ── 각 원고 행 ────────────────────────────────────────────────────
+    _default_start = (_dt.datetime.now() + _dt.timedelta(hours=1)).replace(
+        minute=0, second=0, microsecond=0
+    )
+    for di, draft in enumerate(drafts):
+        cols = st.columns([3, 3, 2, 2, 1])
+
+        # 키워드 + 제목
+        kw_disp    = draft["keyword"][:22] + ("…" if len(draft["keyword"]) > 22 else "")
+        title_disp = draft["title"][:30]  + ("…" if len(draft["title"]) > 30 else "")
+        cols[0].markdown(
+            f"<small><b>{kw_disp}</b><br>{title_disp}</small>",
             unsafe_allow_html=True,
         )
 
-        # ── 발행 설정 ────────────────────────────────────────────────
-        st.markdown("---")
-        st.markdown("#### 발행 설정")
-        interval_min = st.slider(
-            "발행 간격 (분)", min_value=30, max_value=360, value=60, step=30,
-            format="%d분", key="dash_interval",
-            help="포스팅 1개 완료 후 다음 포스팅까지 대기 시간",
+        # 이미지 썸네일
+        img_url = draft.get("img_info", {}).get("url", "")
+        if img_url:
+            cols[1].image(img_url, use_container_width=True)
+        else:
+            cols[1].markdown("<small style='color:#9ca3af'>이미지 없음</small>",
+                             unsafe_allow_html=True)
+
+        # 예약 날짜 / 시간
+        default_dt = _default_start + _dt.timedelta(hours=2 * di)
+        sched_date = cols[2].date_input(
+            "날짜",
+            value=st.session_state.get(f"sched_date_{di}", default_dt.date()),
+            key=f"sched_date_{di}",
+            label_visibility="collapsed",
         )
-        cfg_c1, cfg_c2, cfg_c3 = st.columns(3)
-        with cfg_c1:
-            dash_include_img = st.checkbox("📷 이미지 삽입", value=True, key="dash_img")
-        with cfg_c2:
-            dash_set_featured = st.checkbox(
-                "🖼️ 대표 이미지",
-                value=True, key="dash_featured",
-                help="Featured Image로만 등록 (본문 중복 삽입 방지)",
-                disabled=not st.session_state.get("dash_img", True),
-            )
-        with cfg_c3:
-            dash_wp_status = st.radio(
-                "발행 상태", ["publish", "draft"],
-                format_func=lambda x: "즉시 발행" if x == "publish" else "임시저장",
-                key="dash_wp_status",
-            )
+        sched_time = cols[3].time_input(
+            "시간",
+            value=st.session_state.get(f"sched_time_{di}", default_dt.time()),
+            step=1800,
+            key=f"sched_time_{di}",
+            label_visibility="collapsed",
+        )
 
-        # ── 제어 버튼 ────────────────────────────────────────────────
-        st.markdown("---")
-        btn_c1, btn_c2, btn_c3 = st.columns(3)
-        with btn_c1:
-            if st.button("🚀 자동 발행 시작", type="primary",
-                         use_container_width=True, key="dash_start",
-                         disabled=(_BG_STATE["running"] or n_pending == 0)):
-                if not gemini_api_key:
-                    st.warning("사이드바에서 Gemini API Key를 입력해 주세요.")
-                elif not (WP_URL and WP_USERNAME and WP_APP_PASSWORD):
-                    st.warning(".env에 WordPress 정보를 설정해 주세요.")
-                else:
-                    t = threading.Thread(
-                        target=_bg_worker,
-                        args=(interval_min * 60, gemini_api_key,
-                              pexels_api_key, dash_wp_status,
-                              dash_include_img, dash_set_featured),
-                        daemon=True,
-                    )
-                    _BG_STATE["thread"] = t
-                    t.start()
-                    st.rerun()
-        with btn_c2:
-            if st.button("⏹ 중지", use_container_width=True, key="dash_stop",
-                         disabled=not _BG_STATE["running"]):
-                _BG_STATE["stop"] = True
-                st.rerun()
-        with btn_c3:
-            if st.button("🔄 새로고침", use_container_width=True, key="dash_refresh"):
-                st.rerun()
-
-        # ── 큐 행별 렌더링 (즉시 발행 버튼 포함) ────────────────────
-        st.markdown("---")
-        st.markdown("#### 예약 목록")
-
-        _STATUS_ICON = {
-            "pending":    "🕐 대기",
-            "processing": "⚙️ 처리중",
-            "done":       "✅ 완료",
-            "failed":     "❌ 실패",
+        # 상태 배지
+        _badge = {
+            "pending": "🕐 대기",
+            "sent":    "✅ 전송 완료",
+            "failed":  "❌ 실패",
         }
-
-        if not queue:
-            st.info("큐가 비어 있습니다. 위에서 키워드를 추가해 주세요.")
+        badge_txt = _badge.get(draft["status"], draft["status"])
+        if draft["status"] == "sent" and draft.get("wp_link"):
+            cols[4].markdown(
+                f"<small>{badge_txt}<br>"
+                f"<a href='{draft['wp_link']}' target='_blank'>보기</a></small>",
+                unsafe_allow_html=True,
+            )
+        elif draft["status"] == "failed":
+            cols[4].markdown(
+                f"<small style='color:#ef4444'>{badge_txt}<br>"
+                f"{draft.get('error','')[:30]}</small>",
+                unsafe_allow_html=True,
+            )
         else:
-            # 헤더
-            hc = st.columns([3, 1, 1, 1, 1])
-            for h, t_ in zip(hc, ["키워드", "상태", "이미지", "링크", "즉시발행"]):
-                h.markdown(f"<small><b>{t_}</b></small>", unsafe_allow_html=True)
-            st.markdown("<hr style='margin:.3rem 0'>", unsafe_allow_html=True)
+            cols[4].markdown(f"<small>{badge_txt}</small>", unsafe_allow_html=True)
 
-            for row_i, item in enumerate(queue):
-                rc = st.columns([3, 1, 1, 1, 1])
-                kw_disp = item["keyword"][:28] + ("…" if len(item["keyword"]) > 28 else "")
-                rc[0].markdown(f"<small>{kw_disp}</small>", unsafe_allow_html=True)
-                rc[1].markdown(
-                    f"<small>{_STATUS_ICON.get(item['status'], item['status'])}</small>",
-                    unsafe_allow_html=True,
-                )
-                rc[2].markdown(
-                    f"<small>{item.get('img_status','—')}</small>",
-                    unsafe_allow_html=True,
-                )
-                link = item.get("post_link", "")
-                if link:
-                    rc[3].markdown(f"<small><a href='{link}' target='_blank'>보기</a></small>",
-                                   unsafe_allow_html=True)
-                else:
-                    rc[3].markdown("<small>—</small>", unsafe_allow_html=True)
+        st.markdown("<hr style='margin:.2rem 0;border-color:#f3f4f6'>",
+                    unsafe_allow_html=True)
 
-                # 즉시 발행 버튼 — pending / failed 항목만 활성
-                can_instant = item["status"] in ("pending", "failed")
-                if rc[4].button("⚡", key=f"instant_{row_i}",
-                                disabled=(not can_instant or not gemini_api_key)):
-                    with st.spinner(f"'{item['keyword']}' 즉시 발행 중..."):
-                        ok, msg = instant_publish(
-                            item["keyword"], gemini_api_key, pexels_api_key,
-                            dash_wp_status, dash_include_img, dash_set_featured,
+    # ════════════════════════════════════════════════════════════════
+    # 워드프레스 예약 전송 버튼
+    # ════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    n_pending_drafts = sum(1 for d in drafts if d["status"] == "pending")
+    n_sent_drafts    = sum(1 for d in drafts if d["status"] == "sent")
+
+    send_col, info_col = st.columns([2, 3])
+    with info_col:
+        st.markdown(
+            f"<small>대기 **{n_pending_drafts}**개 · 전송 완료 **{n_sent_drafts}**개 · "
+            f"전체 **{len(drafts)}**개</small>",
+            unsafe_allow_html=True,
+        )
+
+    with send_col:
+        wp_ready = bool(WP_URL and WP_USERNAME and WP_APP_PASSWORD)
+        if st.button(
+            "📅 워드프레스로 예약 전송",
+            type="primary",
+            use_container_width=True,
+            key="send_to_wp",
+            disabled=(not wp_ready or n_pending_drafts == 0),
+        ):
+            if not wp_ready:
+                st.error(".env에 WordPress 정보(WP_URL / WP_USERNAME / WP_APP_PASSWORD)를 설정해 주세요.")
+            else:
+                prog = st.progress(0, text="워드프레스 예약 전송 중...")
+                to_send = [(i, d) for i, d in enumerate(drafts) if d["status"] == "pending"]
+                for si, (di, draft) in enumerate(to_send):
+                    prog.progress(si / len(to_send),
+                                  text=f"({si+1}/{len(to_send)}) '{draft['keyword']}' 전송 중...")
+                    sched_date_v = st.session_state.get(
+                        f"sched_date_{di}",
+                        (_default_start + _dt.timedelta(hours=2 * di)).date(),
+                    )
+                    sched_time_v = st.session_state.get(
+                        f"sched_time_{di}",
+                        (_default_start + _dt.timedelta(hours=2 * di)).time(),
+                    )
+                    sched_dt_str = _dt.datetime.combine(
+                        sched_date_v, sched_time_v
+                    ).strftime("%Y-%m-%dT%H:%M:%S")
+
+                    try:
+                        html = draft["content_html"]
+                        img_info = draft.get("img_info", {})
+                        feat_id  = 0
+                        if img_info.get("url"):
+                            if draft.get("set_featured", True):
+                                try:
+                                    feat_id = upload_pexels_to_wp_media(
+                                        img_info, draft["keyword"]
+                                    )
+                                except Exception:
+                                    html = insert_pexels_image_html(
+                                        html, img_info, draft["keyword"]
+                                    )
+                            else:
+                                html = insert_pexels_image_html(
+                                    html, img_info, draft["keyword"]
+                                )
+
+                        result = post_to_wordpress(
+                            draft["title"], html,
+                            status="future",
+                            featured_media_id=feat_id,
+                            date_str=sched_dt_str,
                         )
-                    q2 = load_queue()
-                    if ok:
-                        # 링크 파싱: "발행 완료! [title](link)" → link 추출
-                        _lm = re.search(r'\(([^)]+)\)$', msg)
-                        _link = _lm.group(1) if _lm else ""
-                        q2[row_i].update({
-                            "status": "done", "img_status": "✅ 완료",
-                            "post_link": _link,
-                            "completed_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                            "error": "",
+                        st.session_state.wp_drafts[di].update({
+                            "status":  "sent",
+                            "wp_link": result.get("link", ""),
+                            "error":   "",
                         })
-                        save_queue(q2)
-                        _log_activity(item["keyword"], "✅ 성공", msg, _link)
-                        st.success(msg)
-                    else:
-                        q2[row_i].update({"status": "failed", "error": msg[:120]})
-                        save_queue(q2)
-                        _log_activity(item["keyword"], "❌ 실패", msg)
-                        st.error(f"즉시 발행 실패: {msg}")
-                    st.rerun()
+                    except requests.HTTPError as e:
+                        err = f"HTTP {e.response.status_code}: {e.response.text[:120]}"
+                        st.session_state.wp_drafts[di].update({
+                            "status": "failed", "error": err,
+                        })
+                    except Exception as e:
+                        st.session_state.wp_drafts[di].update({
+                            "status": "failed", "error": str(e)[:120],
+                        })
 
-            # 큐 관리 버튼
-            st.markdown("<hr style='margin:.4rem 0'>", unsafe_allow_html=True)
-            mc1, mc2, mc3 = st.columns(3)
-            with mc1:
-                if st.button("✅ 완료 삭제", use_container_width=True, key="del_done"):
-                    save_queue([i for i in queue if i["status"] != "done"])
-                    st.rerun()
-            with mc2:
-                if st.button("🔁 실패 재시도", use_container_width=True, key="retry_fail"):
-                    for i in queue:
-                        if i["status"] == "failed":
-                            i.update({"status": "pending", "error": ""})
-                    save_queue(queue)
-                    st.rerun()
-            with mc3:
-                if st.button("🗑️ 전체 초기화", use_container_width=True, key="clear_all_q"):
-                    save_queue([])
-                    st.rerun()
-
-    # ── ② 오른쪽: 실시간 모니터링 패널 ─────────────────────────────
-    with right_col:
-        st.markdown("#### 현재 진행 상태")
-
-        if _BG_STATE["running"]:
-            stage      = _BG_STATE.get("stage", "")
-            cur_kw     = _BG_STATE.get("current_keyword", "")
-            next_at    = _BG_STATE.get("next_publish_at", 0.0)
-            ivl        = _BG_STATE.get("interval_secs", 3600)
-
-            _stage_label = {
-                "generating": "Gemini 원고 생성 중",
-                "image":      "Pexels 이미지 검색 중",
-                "publishing": "워드프레스 발행 중",
-                "waiting":    "다음 발행 대기 중",
-            }
-            stage_text = _stage_label.get(stage, "처리 중")
-
-            if cur_kw:
-                st.info(f"**현재 키워드:** {cur_kw}  \n**단계:** {stage_text}")
-            else:
-                st.info(f"**단계:** {stage_text}")
-
-            # 대기 중 프로그레스 바
-            if stage == "waiting" and next_at > 0:
-                elapsed  = time.time() - (next_at - ivl)
-                progress = min(elapsed / ivl, 1.0) if ivl > 0 else 1.0
-                remain   = max(int(next_at - time.time()), 0)
-                remain_m = remain // 60
-                remain_s = remain % 60
-                st.markdown(f"**다음 발행까지 {remain_m}분 {remain_s}초 남음**")
-                st.progress(progress)
-            elif stage in ("generating", "image", "publishing"):
-                st.progress(0.0, text="처리 중...")
-        else:
-            if _BG_STATE.get("activity_log"):
-                st.success("자동 발행 완료 (대기 중)")
-            else:
-                st.markdown(
-                    "<div style='color:#9ca3af;font-size:.9rem'>자동 발행이 시작되면 "
-                    "여기에 실시간 상태가 표시됩니다.</div>",
-                    unsafe_allow_html=True,
-                )
-
-        # ── 최근 활동 로그 ────────────────────────────────────────────
-        st.markdown("---")
-        st.markdown("#### 최근 활동 로그")
-        activity = _BG_STATE.get("activity_log", [])
-        if not activity:
-            st.markdown("<small style='color:#9ca3af'>아직 활동 내역이 없습니다.</small>",
-                        unsafe_allow_html=True)
-        else:
-            for entry in activity[:20]:
-                icon   = entry.get("status", "")
-                t_str  = entry.get("time", "")
-                kw_str = entry.get("keyword", "")[:20]
-                msg    = entry.get("message", "")[:60]
-                lnk    = entry.get("link", "")
-                if lnk:
-                    st.markdown(
-                        f"<small>{icon} <b>{t_str}</b> · {kw_str}  \n"
-                        f"{msg} — <a href='{lnk}' target='_blank'>글 보기</a></small>",
-                        unsafe_allow_html=True,
+                prog.progress(1.0, text="전송 완료!")
+                sent_ok  = sum(1 for d in st.session_state.wp_drafts if d["status"] == "sent")
+                sent_err = sum(1 for d in st.session_state.wp_drafts if d["status"] == "failed")
+                if sent_err == 0:
+                    st.success(
+                        f"전체 {sent_ok}개 예약 전송 완료! "
+                        "워드프레스 관리자 → 글 → 예약됨 에서 확인하세요."
                     )
                 else:
-                    st.markdown(
-                        f"<small>{icon} <b>{t_str}</b> · {kw_str}  \n{msg}</small>",
-                        unsafe_allow_html=True,
-                    )
+                    st.warning(f"성공 {sent_ok}개 / 실패 {sent_err}개. 실패 항목을 확인해 주세요.")
+                st.rerun()
 
-    # ── 자동 폴링 ────────────────────────────────────────────────────
-    if _BG_STATE["running"]:
-        time.sleep(5)
-        st.rerun()
+    if not wp_ready:
+        st.info("`.env` 파일에 `WP_URL`, `WP_USERNAME`, `WP_APP_PASSWORD`를 설정하면 "
+                "예약 전송 버튼이 활성화됩니다.", icon="ℹ️")
 
     st.stop()
 

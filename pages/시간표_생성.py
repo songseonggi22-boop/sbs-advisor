@@ -307,31 +307,78 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700;900&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;900&display=swap');
 html,body,[class*="css"]{font-family:'Noto Sans KR',sans-serif;}
+
+/* ── 상단 헤더 ── */
 .sbs-header{
   background:linear-gradient(120deg,#1e3a5f 0%,#1F4E79 60%,#2563a8 100%);
-  padding:1.2rem 2rem;border-radius:14px;margin-bottom:1.2rem;
-  box-shadow:0 4px 24px rgba(31,78,121,.32);
+  padding:1.1rem 1.8rem;border-radius:12px;margin-bottom:1rem;
+  box-shadow:0 4px 20px rgba(31,78,121,.28);
 }
-.sbs-header h1{margin:0;color:#fff;font-size:1.4rem;font-weight:900;}
-.sbs-header p{margin:.25rem 0 0;color:rgba(255,255,255,.8);font-size:.87rem;}
-.hit-card{
-  background:#f8fafc;border:1.5px solid #e2e8f0;border-radius:10px;
-  padding:.7rem 1rem .5rem;margin-bottom:.5rem;transition:border-color .15s;
+.sbs-header h1{margin:0;color:#fff;font-size:1.35rem;font-weight:900;}
+.sbs-header p{margin:.2rem 0 0;color:rgba(255,255,255,.78);font-size:.84rem;}
+
+/* ── 월 구분 헤더 ── */
+.month-header{
+  display:flex;align-items:center;gap:.6rem;
+  background:linear-gradient(90deg,#1e3a5f,#2563a8 80%,transparent 100%);
+  color:#fff;border-radius:8px;padding:.45rem 1rem;
+  margin:1.1rem 0 .45rem;
 }
-.hit-card:hover{border-color:#3b82f6;background:#eff6ff;}
-.hit-name{font-size:.97rem;font-weight:800;color:#1e3a5f;margin-bottom:.15rem;}
-.hit-meta{font-size:.8rem;color:#475569;line-height:1.7;}
-.cart-wrap{
-  background:#eff6ff;border:1.5px solid #bfdbfe;border-radius:9px;
-  padding:.5rem .85rem;margin-bottom:.4rem;
+.month-title{font-size:1.05rem;font-weight:900;letter-spacing:-.3px;}
+.month-cnt{
+  background:rgba(255,255,255,.22);border-radius:20px;
+  padding:.05rem .55rem;font-size:.75rem;font-weight:700;
 }
-.cart-name{font-weight:800;color:#1e40af;font-size:.92rem;}
-.cart-meta{font-size:.76rem;color:#64748b;line-height:1.6;}
+
+/* ── 과정 카드 ── */
+.course-card{
+  border-left:4px solid #ccc;
+  background:#fff;border-radius:0 9px 9px 0;
+  padding:.6rem .9rem .5rem;margin-bottom:.35rem;
+  box-shadow:0 1px 4px rgba(0,0,0,.07);
+  transition:box-shadow .15s;
+}
+.course-card:hover{box-shadow:0 3px 12px rgba(0,0,0,.12);}
+.course-card.wd{border-left-color:#2563a8;}
+.course-card.we{border-left-color:#059669;}
+
+.course-title-row{
+  display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;
+  margin-bottom:.3rem;
+}
+.course-name{font-size:.98rem;font-weight:800;color:#0f172a;}
+.badge{
+  display:inline-flex;align-items:center;
+  border-radius:5px;padding:.05rem .4rem;
+  font-size:.72rem;font-weight:700;white-space:nowrap;
+}
+.badge-wd{background:#dbeafe;color:#1d4ed8;}
+.badge-we{background:#dcfce7;color:#15803d;}
+.badge-time{background:#f1f5f9;color:#475569;}
+.badge-room{background:#fef3c7;color:#92400e;}
+
+.course-detail-row{
+  display:flex;align-items:center;flex-wrap:wrap;gap:.5rem 1.2rem;
+  font-size:.79rem;color:#64748b;line-height:1.5;
+}
+.period-text{font-weight:700;color:#1e3a5f;}
+
+/* ── 장바구니 카드 ── */
+.cart-card{
+  background:#f0f7ff;border:1.5px solid #bfdbfe;
+  border-left:4px solid #2563a8;
+  border-radius:0 9px 9px 0;padding:.55rem .9rem;margin-bottom:.4rem;
+}
+.cart-card.we{border-left-color:#059669;background:#f0fdf4;border-color:#bbf7d0;}
+.cart-name{font-weight:800;color:#1e40af;font-size:.93rem;}
+.cart-meta{font-size:.77rem;color:#64748b;line-height:1.7;margin-top:.15rem;}
+.cart-period{font-weight:700;color:#1e3a5f;}
+
 .tag{
   display:inline-block;border-radius:5px;
-  padding:.08rem .4rem;font-size:.72rem;font-weight:700;margin-right:.3rem;
+  padding:.06rem .38rem;font-size:.7rem;font-weight:700;margin-right:.25rem;
 }
 .stButton>button{border-radius:8px!important;}
 .stDownloadButton>button{
@@ -386,7 +433,7 @@ def add_to_cart(e: CourseEntry):
 col_left, col_right = st.columns([3, 2], gap='large')
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 왼쪽: 검색
+# 왼쪽: 검색 (월별 그룹핑)
 # ══════════════════════════════════════════════════════════════════════════════
 with col_left:
     st.markdown('### 🔍 과정 검색')
@@ -401,50 +448,109 @@ with col_left:
         results = search_courses(all_courses, keyword)
 
         if not results:
-            st.info('검색 결과가 없습니다. 다른 키워드를 입력해 보세요.')
+            st.markdown(
+                "<div style='background:#fff7ed;border:1.5px solid #fed7aa;"
+                "border-radius:9px;padding:1rem 1.2rem;color:#9a3412;font-size:.88rem'>"
+                "검색 결과가 없습니다. 다른 키워드를 입력해 보세요.</div>",
+                unsafe_allow_html=True,
+            )
         else:
-            st.caption(f'**{len(results)}개** 검색됨')
-
+            # ── 월별 그룹핑 ───────────────────────────────────────────────
+            from collections import defaultdict
+            groups: dict[tuple, list] = defaultdict(list)
             for e in results:
-                sheet_color = '#2563a8' if e.sheet == '평일' else '#059669'
-                sheet_bg    = '#dbeafe' if e.sheet == '평일' else '#dcfce7'
+                try:
+                    s = datetime.strptime(e.start_date, "%Y-%m-%d")
+                    key = (s.year, s.month)
+                except Exception:
+                    key = (0, 0)
+                groups[key].append(e)
+
+            total = len(results)
+            months = len(groups)
+            st.markdown(
+                f"<p style='color:#64748b;font-size:.83rem;margin:.2rem 0 .1rem'>"
+                f"<b style='color:#1e3a5f'>{total}개</b> 검색됨 &nbsp;·&nbsp; "
+                f"<b style='color:#1e3a5f'>{months}개월</b> 기간</p>",
+                unsafe_allow_html=True,
+            )
+
+            for (yr, mo), group_entries in sorted(groups.items()):
+                # 월 헤더
+                if yr == 0:
+                    month_label = "날짜 미정"
+                else:
+                    month_label = f"{yr}년 &nbsp;{mo}월"
 
                 st.markdown(
-                    f"<div class='hit-card'>"
-                    f"<div class='hit-name'>"
-                    f"<span class='tag' style='background:{sheet_color};color:#fff'>{e.sheet}</span>"
-                    f"{e.name}"
-                    f"</div>"
-                    f"<div class='hit-meta'>"
-                    f"📍 {e.room} &nbsp;|&nbsp; ⏰ {e.start_time} &nbsp;|&nbsp; "
-                    f"👨‍🏫 {e.instructor or '-'} &nbsp;|&nbsp; 📆 {e.days or '-'}"
-                    f"<br>📅 <b>{e.month_label}</b> &nbsp;({e.period_label})"
-                    f"</div>"
+                    f"<div class='month-header'>"
+                    f"<span class='month-title'>📅 {month_label}</span>"
+                    f"<span class='month-cnt'>{len(group_entries)}개 과정</span>"
                     f"</div>",
                     unsafe_allow_html=True,
                 )
 
-                btn_key = f"add_{e.name}_{e.room}_{e.start_date}_{e.start_time}"
-                if st.button(
-                    f'+ 장바구니 추가',
-                    key=btn_key,
-                    use_container_width=False,
-                ):
-                    add_to_cart(e)
-                    st.rerun()
+                # 해당 월의 과정 목록
+                for e in group_entries:
+                    is_wd  = e.sheet == '평일'
+                    card_cls  = 'wd' if is_wd else 'we'
+                    badge_cls = 'badge-wd' if is_wd else 'badge-we'
+
+                    # 날짜 포맷: "4월 13일 → 5월 11일"
+                    try:
+                        sd = datetime.strptime(e.start_date, "%Y-%m-%d")
+                        ed = datetime.strptime(e.end_date,   "%Y-%m-%d")
+                        if sd.month == ed.month:
+                            period_str = f"{sd.month}월 {sd.day}일 ~ {ed.day}일"
+                        else:
+                            period_str = f"{sd.month}월 {sd.day}일 ~ {ed.month}월 {ed.day}일"
+                    except Exception:
+                        period_str = e.period_label
+
+                    info_html = (
+                        f"<div class='course-card {card_cls}'>"
+                        f"<div class='course-title-row'>"
+                        f"<span class='course-name'>{e.name}</span>"
+                        f"<span class='badge {badge_cls}'>{e.sheet}</span>"
+                        f"<span class='badge badge-time'>⏰ {e.start_time}</span>"
+                        f"<span class='badge badge-room'>📍 {e.room}</span>"
+                        f"</div>"
+                        f"<div class='course-detail-row'>"
+                        f"<span>👨‍🏫 {e.instructor or '미정'}</span>"
+                        f"<span>📆 {e.days or '-'}</span>"
+                        f"<span class='period-text'>🗓 {period_str}</span>"
+                        f"</div>"
+                        f"</div>"
+                    )
+
+                    col_card, col_btn = st.columns([5, 1])
+                    with col_card:
+                        st.markdown(info_html, unsafe_allow_html=True)
+                    with col_btn:
+                        # 버튼이 카드와 세로 정렬되도록 여백 추가
+                        st.markdown("<div style='margin-top:.35rem'></div>", unsafe_allow_html=True)
+                        btn_key = f"add_{e.name}_{e.room}_{e.start_date}_{e.start_time}"
+                        if st.button('＋ 추가', key=btn_key, use_container_width=True):
+                            add_to_cart(e)
+                            st.rerun()
 
     else:
-        # 검색 전: 전체 과정명 태그
+        # 검색 전: 전체 과정명 태그 구름
         names = sorted({e.name for e in all_courses})
-        st.caption(f'총 **{len(names)}개** 과정 등록됨')
-        tags = ' '.join(
+        st.markdown(
+            f"<p style='color:#64748b;font-size:.83rem;margin-bottom:.5rem'>"
+            f"총 <b style='color:#1e3a5f'>{len(names)}개</b> 과정이 등록되어 있습니다. "
+            f"과정명을 입력해 검색하세요.</p>",
+            unsafe_allow_html=True,
+        )
+        tags = ''.join(
             f"<span style='background:#e2e8f0;border-radius:5px;"
-            f"padding:.12rem .45rem;font-size:.78rem;margin:.1rem .1rem;"
-            f"display:inline-block'>{n}</span>"
+            f"padding:.12rem .5rem;font-size:.8rem;margin:.18rem .12rem;"
+            f"display:inline-block;color:#374151;font-weight:500'>{n}</span>"
             for n in names
         )
         st.markdown(
-            f"<div style='line-height:2.2;margin-top:.4rem'>{tags}</div>",
+            f"<div style='line-height:2.4;margin-top:.2rem'>{tags}</div>",
             unsafe_allow_html=True,
         )
 
@@ -454,37 +560,59 @@ with col_left:
 # ══════════════════════════════════════════════════════════════════════════════
 with col_right:
     cart = st.session_state.cart
-    st.markdown(f'### 🛒 선택 과목 ({len(cart)}개)')
+    st.markdown(f'### 🛒 선택 과목 &nbsp;<span style="font-size:.85rem;color:#64748b;font-weight:500">({len(cart)}개)</span>', unsafe_allow_html=True)
 
     if not cart:
         st.markdown(
             "<div style='background:#f8fafc;border:2px dashed #cbd5e1;"
             "border-radius:10px;padding:2rem;text-align:center;color:#94a3b8'>"
-            "아직 선택한 과목이 없어요<br>"
-            "<small>검색 결과에서 + 버튼을 눌러 추가하세요</small>"
+            "<div style='font-size:2rem;margin-bottom:.5rem'>🛒</div>"
+            "<div style='font-weight:600;margin-bottom:.3rem'>선택한 과목이 없어요</div>"
+            "<small>왼쪽 검색 결과에서 <b>＋ 추가</b>를 누르세요</small>"
             '</div>',
             unsafe_allow_html=True,
         )
     else:
         for i, item in enumerate(cart):
-            sc = '#2563a8' if item['sheet'] == '평일' else '#059669'
-            col_info, col_del = st.columns([5, 1])
+            is_wd   = item['sheet'] == '평일'
+            card_cls = 'wd' if is_wd else 'we'
+            badge_cls = 'badge-wd' if is_wd else 'badge-we'
+            sc_text  = '#1d4ed8' if is_wd else '#15803d'
+
+            try:
+                sd = datetime.strptime(item['start_date'], "%Y-%m-%d")
+                ed = datetime.strptime(item['end_date'],   "%Y-%m-%d")
+                if sd.month == ed.month:
+                    period_str = f"{sd.year}년 {sd.month}월 {sd.day}일 ~ {ed.day}일"
+                else:
+                    period_str = f"{sd.month}월 {sd.day}일 ~ {ed.month}월 {ed.day}일"
+            except Exception:
+                period_str = f"{item['start_date']} ~ {item['end_date']}"
+
+            col_info, col_del = st.columns([6, 1])
             with col_info:
                 st.markdown(
-                    f"<div class='cart-wrap'>"
-                    f"<span class='cart-name'>{item['name']}</span> "
-                    f"<span class='tag' style='background:{sc};color:#fff'>{item['sheet']}</span>"
+                    f"<div class='cart-card {card_cls}'>"
+                    f"<div style='display:flex;align-items:center;gap:.4rem;margin-bottom:.2rem'>"
+                    f"<span class='cart-name'>{item['name']}</span>"
+                    f"<span class='badge {badge_cls}'>{item['sheet']}</span>"
+                    f"</div>"
                     f"<div class='cart-meta'>"
-                    f"📍 {item['room']} &nbsp;·&nbsp; ⏰ {item['start_time']} &nbsp;·&nbsp; 👨‍🏫 {item['instructor'] or '-'}<br>"
-                    f"📅 {item['start_date']} ~ {item['end_date']}"
+                    f"⏰ {item['start_time']} &nbsp;·&nbsp; "
+                    f"📍 {item['room']} &nbsp;·&nbsp; "
+                    f"👨‍🏫 {item['instructor'] or '미정'} &nbsp;·&nbsp; "
+                    f"📆 {item['days'] or '-'}<br>"
+                    f"<span class='cart-period'>🗓 {period_str}</span>"
                     f"</div></div>",
                     unsafe_allow_html=True,
                 )
             with col_del:
+                st.markdown("<div style='margin-top:.4rem'></div>", unsafe_allow_html=True)
                 if st.button('✕', key=f'del_{i}', help='제거'):
                     st.session_state.cart.pop(i)
                     st.rerun()
 
+        st.markdown("<div style='margin-top:.5rem'></div>", unsafe_allow_html=True)
         if st.button('🗑️ 전체 비우기', use_container_width=True):
             st.session_state.cart = []
             st.rerun()

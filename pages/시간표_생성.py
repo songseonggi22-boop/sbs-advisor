@@ -92,7 +92,7 @@ def _parse_cell(raw: str) -> tuple[str, str | None, str | None]:
     return name, instructor, None
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_resource(show_spinner=False)
 def load_all_hits() -> list[CourseHit]:
     """시간표.xlsx 전체를 파싱해 CourseHit 리스트로 반환."""
     if not TIMETABLE_PATH.exists():

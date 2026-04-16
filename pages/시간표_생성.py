@@ -199,6 +199,106 @@ def search_courses(entries: list[CourseEntry], keyword: str) -> list[CourseEntry
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 수강료 로드 & 매칭
+# ══════════════════════════════════════════════════════════════════════════════
+
+@st.cache_resource(show_spinner=False)
+def load_price_map() -> dict:
+    """수강료.xlsx → {과정명: {'평일': 가격, '주말': 가격}} 딕셔너리."""
+    fp = ROOT / "수강료.xlsx"
+    if not fp.exists():
+        return {}
+
+    pm: dict[str, dict[str, int]] = {}
+
+    def _register(raw_name: str, price_val, sheet: str) -> None:
+        if not raw_name or not isinstance(price_val, (int, float)) or price_val <= 0:
+            return
+        # 방학 특강은 별도 키 '방학'으로 등록 → 일반 수강료 덮어쓰기 방지
+        is_vacation = '방학' in raw_name
+        base = re.sub(r'/주말|/방학|\(방학\)', '', raw_name).strip()
+        effective_sheet = '방학' if is_vacation else sheet
+        # 쉼표 구분 과목 개별 등록 ("포토샵, 일러스트" → 포토샵, 일러스트 각각)
+        for part in [p.strip() for p in base.split(',')]:
+            if part:
+                # setdefault: 먼저 등록된 가격 우선 (방학 가격으로 덮어쓰기 방지)
+                pm.setdefault(part, {}).setdefault(effective_sheet, int(price_val))
+
+    try:
+        wb  = openpyxl.load_workbook(fp, data_only=True)
+        ws  = wb['수강료'] if '수강료' in wb.sheetnames else wb.active
+        cur = '평일'   # 현재 구분 추적
+
+        for row in ws.iter_rows(values_only=True):
+            # ── 왼쪽 테이블 (B=1, C=2, D=3, E=4) ──────────────────────────
+            sect_l = str(row[1] or '').replace('\n', ' ').strip()
+            if sect_l:
+                if '주말' in sect_l:
+                    cur = '주말'
+                elif '평일' in sect_l:
+                    cur = '평일'
+            name_l  = str(row[3] or '').strip()
+            sheet_l = '주말' if '/주말' in name_l else cur
+            _register(name_l, row[4], sheet_l)
+
+            # ── 오른쪽 테이블 (J=9, K=10, L=11, M=12) ─────────────────────
+            name_r  = str(row[11] or '').strip() if len(row) > 11 else ''
+            price_r = row[12] if len(row) > 12 else None
+            sheet_r = '주말' if '/주말' in name_r else '평일'
+            _register(name_r, price_r, sheet_r)
+
+    except Exception:
+        pass
+
+    return pm
+
+
+def find_price(course_name: str, sheet: str, pm: dict) -> int | None:
+    """
+    과정명 + 구분(평일/주말) → 수강료(원) or None.
+    국비/계약 과정은 -1 반환 (무료 마커).
+    """
+    if not pm:
+        return None
+    if re.match(r'^\(국\)|^\(계\)', course_name):
+        return -1  # 국비훈련
+
+    def _lookup(name: str) -> int | None:
+        entry = pm.get(name)
+        if entry:
+            return entry.get(sheet) or entry.get('평일') or next(iter(entry.values()), None)
+        return None
+
+    # 1) 정확 일치
+    p = _lookup(course_name)
+    if p:
+        return p
+
+    # 2) 공백 제거 후 일치
+    name_ns = course_name.replace(' ', '')
+    for key, entry in pm.items():
+        if key.replace(' ', '') == name_ns:
+            return entry.get(sheet) or entry.get('평일') or next(iter(entry.values()), None)
+
+    # 3) 끝 숫자 제거: 마야3 → 마야, 블렌더1 → 블렌더
+    name_base = re.sub(r'\d+$', '', course_name).strip()
+    if name_base and name_base != course_name:
+        p = _lookup(name_base)
+        if p:
+            return p
+
+    # 4) 퍼지: 과정명이 price key의 시작이거나 price key가 과정명의 시작
+    for key, entry in pm.items():
+        k = key.replace(' ', '').lower()
+        n = name_ns.lower()
+        n_base = name_base.replace(' ', '').lower()
+        if n.startswith(k) or k.startswith(n) or (n_base and k.startswith(n_base)):
+            return entry.get(sheet) or entry.get('평일') or next(iter(entry.values()), None)
+
+    return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 엑셀 생성
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -376,6 +476,26 @@ html,body,[class*="css"]{font-family:'Noto Sans KR',sans-serif;}
 .cart-meta{font-size:.77rem;color:#64748b;line-height:1.7;margin-top:.15rem;}
 .cart-period{font-weight:700;color:#1e3a5f;}
 
+.price-tag{
+  margin-left:auto;
+  background:#fef9c3;color:#78350f;
+  border:1.5px solid #fde68a;border-radius:6px;
+  padding:.08rem .6rem;font-size:.85rem;font-weight:900;
+  white-space:nowrap;letter-spacing:-.5px;
+}
+.price-tag.free{background:#dcfce7;color:#15803d;border-color:#bbf7d0;}
+.price-tag.unknown{background:#f1f5f9;color:#94a3b8;border-color:#e2e8f0;font-weight:500;}
+
+/* 장바구니 합계 */
+.cart-total{
+  background:linear-gradient(90deg,#1e3a5f,#2563a8);
+  color:#fff;border-radius:8px;padding:.55rem 1rem;
+  display:flex;justify-content:space-between;align-items:center;
+  margin-bottom:.5rem;
+}
+.cart-total-label{font-size:.82rem;opacity:.85;}
+.cart-total-amount{font-size:1.1rem;font-weight:900;letter-spacing:-.5px;}
+
 .tag{
   display:inline-block;border-radius:5px;
   padding:.06rem .38rem;font-size:.7rem;font-weight:700;margin-right:.25rem;
@@ -405,12 +525,14 @@ if not all_courses:
     st.error('⚠️ 강의시간표 파일을 읽을 수 없습니다.')
     st.stop()
 
+price_map = load_price_map()
+
 # ── 세션 상태 ─────────────────────────────────────────────────────────────────
 if 'cart' not in st.session_state:
     st.session_state.cart = []
 
 
-def add_to_cart(e: CourseEntry):
+def add_to_cart(e: CourseEntry, price: int | None):
     key = (e.name, e.room, e.start_time, e.start_date)
     if not any(
         (c['name'], c['room'], c['start_time'], c['start_date']) == key
@@ -426,6 +548,7 @@ def add_to_cart(e: CourseEntry):
             'end_date':   e.end_date,
             'sheet':      e.sheet,
             'source':     e.source,
+            'price':      price,
         })
 
 
@@ -492,11 +615,11 @@ with col_left:
 
                 # 해당 월의 과정 목록
                 for e in group_entries:
-                    is_wd  = e.sheet == '평일'
+                    is_wd     = e.sheet == '평일'
                     card_cls  = 'wd' if is_wd else 'we'
                     badge_cls = 'badge-wd' if is_wd else 'badge-we'
 
-                    # 날짜 포맷: "4월 13일 → 5월 11일"
+                    # 날짜 포맷
                     try:
                         sd = datetime.strptime(e.start_date, "%Y-%m-%d")
                         ed = datetime.strptime(e.end_date,   "%Y-%m-%d")
@@ -507,6 +630,18 @@ with col_left:
                     except Exception:
                         period_str = e.period_label
 
+                    # 수강료
+                    price     = find_price(e.name, e.sheet, price_map)
+                    if price == -1:
+                        price_html = "<span class='price-tag free'>국비훈련 무료</span>"
+                        price_disp = -1
+                    elif price:
+                        price_html = f"<span class='price-tag'>{price:,}원</span>"
+                        price_disp = price
+                    else:
+                        price_html = "<span class='price-tag unknown'>수강료 문의</span>"
+                        price_disp = None
+
                     info_html = (
                         f"<div class='course-card {card_cls}'>"
                         f"<div class='course-title-row'>"
@@ -514,6 +649,7 @@ with col_left:
                         f"<span class='badge {badge_cls}'>{e.sheet}</span>"
                         f"<span class='badge badge-time'>⏰ {e.start_time}</span>"
                         f"<span class='badge badge-room'>📍 {e.room}</span>"
+                        f"{price_html}"
                         f"</div>"
                         f"<div class='course-detail-row'>"
                         f"<span>👨‍🏫 {e.instructor or '미정'}</span>"
@@ -527,11 +663,10 @@ with col_left:
                     with col_card:
                         st.markdown(info_html, unsafe_allow_html=True)
                     with col_btn:
-                        # 버튼이 카드와 세로 정렬되도록 여백 추가
                         st.markdown("<div style='margin-top:.35rem'></div>", unsafe_allow_html=True)
                         btn_key = f"add_{e.name}_{e.room}_{e.start_date}_{e.start_time}"
                         if st.button('＋ 추가', key=btn_key, use_container_width=True):
-                            add_to_cart(e)
+                            add_to_cart(e, price_disp)
                             st.rerun()
 
     else:
@@ -574,10 +709,9 @@ with col_right:
         )
     else:
         for i, item in enumerate(cart):
-            is_wd   = item['sheet'] == '평일'
-            card_cls = 'wd' if is_wd else 'we'
+            is_wd     = item['sheet'] == '평일'
+            card_cls  = 'wd' if is_wd else 'we'
             badge_cls = 'badge-wd' if is_wd else 'badge-we'
-            sc_text  = '#1d4ed8' if is_wd else '#15803d'
 
             try:
                 sd = datetime.strptime(item['start_date'], "%Y-%m-%d")
@@ -589,6 +723,15 @@ with col_right:
             except Exception:
                 period_str = f"{item['start_date']} ~ {item['end_date']}"
 
+            # 가격 표시
+            p = item.get('price')
+            if p == -1:
+                price_html = "<span class='price-tag free' style='font-size:.75rem'>국비훈련 무료</span>"
+            elif isinstance(p, int) and p > 0:
+                price_html = f"<span class='price-tag' style='font-size:.78rem'>{p:,}원</span>"
+            else:
+                price_html = "<span class='price-tag unknown' style='font-size:.75rem'>수강료 문의</span>"
+
             col_info, col_del = st.columns([6, 1])
             with col_info:
                 st.markdown(
@@ -596,6 +739,7 @@ with col_right:
                     f"<div style='display:flex;align-items:center;gap:.4rem;margin-bottom:.2rem'>"
                     f"<span class='cart-name'>{item['name']}</span>"
                     f"<span class='badge {badge_cls}'>{item['sheet']}</span>"
+                    f"{price_html}"
                     f"</div>"
                     f"<div class='cart-meta'>"
                     f"⏰ {item['start_time']} &nbsp;·&nbsp; "
@@ -612,7 +756,34 @@ with col_right:
                     st.session_state.cart.pop(i)
                     st.rerun()
 
-        st.markdown("<div style='margin-top:.5rem'></div>", unsafe_allow_html=True)
+        # ── 수강료 합계 ──────────────────────────────────────────────────────
+        known_prices = [
+            item['price'] for item in cart
+            if isinstance(item.get('price'), int) and item['price'] > 0
+        ]
+        gov_count  = sum(1 for item in cart if item.get('price') == -1)
+        unknown_count = len(cart) - len(known_prices) - gov_count
+
+        if known_prices or gov_count:
+            total_str = f"{sum(known_prices):,}원"
+            if gov_count:
+                total_str += f" + 국비 {gov_count}개"
+            if unknown_count:
+                total_str += f" + 문의 {unknown_count}개"
+            note = ""
+            if gov_count:
+                note = " (국비훈련 제외)"
+            elif unknown_count:
+                note = " (문의 제외)"
+            st.markdown(
+                f"<div class='cart-total'>"
+                f"<span class='cart-total-label'>💰 예상 수강료 합계{note}</span>"
+                f"<span class='cart-total-amount'>{total_str}</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("<div style='margin-top:.3rem'></div>", unsafe_allow_html=True)
         if st.button('🗑️ 전체 비우기', use_container_width=True):
             st.session_state.cart = []
             st.rerun()

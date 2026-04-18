@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"\nimport sys, json, subprocess, os\ndata = json.load(sys.stdin)\nfile_path = data.get('tool_input', {}).get('file_path') or data.get('tool_response', {}).get('filePath', '')\nrepo = 'C:/Users/SBS/Desktop/test/sbs-advisor'\nif not file_path.startswith(repo): sys.exit(0)\nos.chdir(repo)\nsubprocess.run(['git', 'add', '-A'])\nresult = subprocess.run(['git', 'diff', '--cached', '--quiet'])\nif result.returncode == 0: sys.exit(0)\nfname = os.path.basename(file_path)\nsubprocess.run(['git', 'commit', '-m', f'auto: update {fname}'])\nsubprocess.run(['git', 'push', 'origin', 'master'])\n\"",
+            "timeout": 60,
+            "statusMessage": "GitHub에 자동 푸시 중..."
+          }
+        ]
+      }
+    ]
+  }
+}

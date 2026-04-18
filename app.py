@@ -822,7 +822,8 @@ def post_to_wordpress(title: str, content: str, status: str = "publish",
     ).decode("utf-8")
     headers = {
         "Authorization": f"Basic {token}",
-        "Content-Type": "application/json",
+        "Content-Type": "application/json; charset=utf-8",
+        "Accept": "application/json",
     }
     payload: dict = {"title": title, "content": content, "status": status}
     if featured_media_id:
@@ -832,7 +833,7 @@ def post_to_wordpress(title: str, content: str, status: str = "publish",
     resp = requests.post(
         endpoint,
         headers=headers,
-        json=payload,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         timeout=30,
     )
     resp.raise_for_status()

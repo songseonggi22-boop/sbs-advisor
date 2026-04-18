@@ -13,6 +13,7 @@ auto_pilot.py — SBS아카데미 블로그 자동 발행 파일럿
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import os
 import time
@@ -99,12 +100,17 @@ def post_to_wordpress(title: str, content: str, status: str = "publish") -> dict
     ).decode("utf-8")
     headers = {
         "Authorization": f"Basic {token}",
-        "Content-Type": "application/json",
+        "Content-Type": "application/json; charset=utf-8",
+        "Accept": "application/json",
     }
+    payload = json.dumps(
+        {"title": title, "content": content, "status": status},
+        ensure_ascii=False,
+    ).encode("utf-8")
     resp = requests.post(
         endpoint,
         headers=headers,
-        json={"title": title, "content": content, "status": status},
+        data=payload,
         timeout=30,
     )
     resp.raise_for_status()

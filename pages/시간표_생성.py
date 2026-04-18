@@ -30,6 +30,7 @@ class CourseEntry:
     name:       str          # 과정명
     room:       str          # 강의실 (A-1 등)
     start_time: str          # 시작 시간 (09:00)
+    end_time:   str          # 종료 시간 (11:00)
     instructor: str          # 강사명
     days:       str          # 수업 요일 (월~목, 토/일 등)
     start_date: str          # 개강일 YYYY-MM-DD
@@ -62,6 +63,17 @@ class CourseEntry:
 # ══════════════════════════════════════════════════════════════════════════════
 # 파싱
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _calc_end_time(start_time: str, rowspan: int) -> str:
+    """시작 시간(HH:MM) + rowspan × 30분 → 종료 시간."""
+    from datetime import timedelta
+    try:
+        dt = datetime.strptime(start_time, "%H:%M")
+        dt += timedelta(minutes=30 * rowspan)
+        return dt.strftime("%H:%M")
+    except Exception:
+        return ''
+
 
 def _parse_cell_text(text: str) -> tuple[str, str, str, str, str] | None:
     """
@@ -144,15 +156,18 @@ def _load_xls_file(fp: Path, sheet: str) -> list[CourseEntry]:
             # 나머지 셀들
             data_col = 1   # room_map 인덱스: row1의 첫 셀(빈 코너셀)이 col0이므로 1부터 시작
             for i, td in enumerate(cells[1:], start=1):
-                span  = int(td.get('colspan', 1))
-                text  = td.get_text(strip=True)
-                room  = room_map.get(data_col, f'Col{data_col}')
-                parsed = _parse_cell_text(text)
+                span    = int(td.get('colspan', 1))
+                rowspan = int(td.get('rowspan', 1))
+                text    = td.get_text(strip=True)
+                room    = room_map.get(data_col, f'Col{data_col}')
+                parsed  = _parse_cell_text(text)
                 if parsed:
                     name, instr, days, sd, ed = parsed
+                    end_time = _calc_end_time(cur_time, rowspan)
                     entries.append(CourseEntry(
                         name=name, room=room,
                         start_time=cur_time,
+                        end_time=end_time,
                         instructor=instr, days=days,
                         start_date=sd, end_date=ed,
                         capacity='', enrolled='',
@@ -359,11 +374,13 @@ def build_excel(student_name: str, cart: list[dict]) -> bytes:
     for ri, item in enumerate(cart, 3):
         ws.row_dimensions[ri].height = 40
         row_fill = wd_fill if item['sheet'] == '평일' else we_fill
+        et = item.get('end_time', '')
+        time_str = f"{item['start_time']}~{et}" if et else item['start_time']
         vals = [
             item['name'],
             item['sheet'],
             item['room'],
-            item['start_time'],
+            time_str,
             item['instructor'],
             f"{item['start_date']} ~ {item['end_date']}",
             item['days'],
@@ -542,6 +559,7 @@ def add_to_cart(e: CourseEntry, price: int | None):
             'name':       e.name,
             'room':       e.room,
             'start_time': e.start_time,
+            'end_time':   e.end_time,
             'instructor': e.instructor,
             'days':       e.days,
             'start_date': e.start_date,
@@ -647,7 +665,7 @@ with col_left:
                         f"<div class='course-title-row'>"
                         f"<span class='course-name'>{e.name}</span>"
                         f"<span class='badge {badge_cls}'>{e.sheet}</span>"
-                        f"<span class='badge badge-time'>⏰ {e.start_time}</span>"
+                        f"<span class='badge badge-time'>⏰ {e.start_time}{'~'+e.end_time if e.end_time else ''}</span>"
                         f"<span class='badge badge-room'>📍 {e.room}</span>"
                         f"{price_html}"
                         f"</div>"
@@ -742,7 +760,7 @@ with col_right:
                     f"{price_html}"
                     f"</div>"
                     f"<div class='cart-meta'>"
-                    f"⏰ {item['start_time']} &nbsp;·&nbsp; "
+                    f"⏰ {item['start_time']}{'~'+item['end_time'] if item.get('end_time') else ''} &nbsp;·&nbsp; "
                     f"📍 {item['room']} &nbsp;·&nbsp; "
                     f"👨‍🏫 {item['instructor'] or '미정'} &nbsp;·&nbsp; "
                     f"📆 {item['days'] or '-'}<br>"

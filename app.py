@@ -812,11 +812,31 @@ def _bg_worker(interval_secs: int, gemini_key: str, pexels_key: str,
         _BG_STATE["next_publish_at"] = 0.0
 
 
+def _make_xmlrpc_client(xmlrpc_url: str) -> Client:
+    """PHP 경고문이 섞인 XML-RPC 응답을 정상 처리하는 클라이언트를 반환합니다."""
+    import io
+    import xmlrpc.client as _xc
+
+    _base = _xc.SafeTransport if xmlrpc_url.startswith("https") else _xc.Transport
+
+    class _CleanTransport(_base):
+        """응답에서 <?xml 이전에 출력된 PHP 경고/알림을 제거합니다."""
+        def parse_response(self, response):
+            raw = response.read()
+            xml_start = raw.find(b"<?xml")
+            if xml_start > 0:
+                raw = raw[xml_start:]
+            return super().parse_response(io.BytesIO(raw))
+
+    return Client(xmlrpc_url, WP_USERNAME, WP_APP_PASSWORD,
+                  transport=_CleanTransport())
+
+
 def post_to_wordpress(title: str, content: str, status: str = "publish",
                       featured_media_id: int = 0, date_str: str = "") -> dict:
     """XML-RPC로 워드프레스 포스트를 발행합니다. (Imunify360 REST API 차단 우회)"""
     xmlrpc_url = f"{WP_URL.rstrip('/')}/xmlrpc.php"
-    client = Client(xmlrpc_url, WP_USERNAME, WP_APP_PASSWORD)
+    client = _make_xmlrpc_client(xmlrpc_url)
 
     post = WordPressPost()
     post.title = title
@@ -830,7 +850,6 @@ def post_to_wordpress(title: str, content: str, status: str = "publish",
 
     post_id = client.call(NewPost(post))
 
-    # REST API와 동일한 dict 형태로 반환
     return {
         "id": int(post_id) if post_id else None,
         "link": f"{WP_URL.rstrip('/')}/?p={post_id}" if post_id else "",

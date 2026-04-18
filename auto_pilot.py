@@ -94,10 +94,29 @@ def generate_post(keyword: str) -> str:
     return response.text
 
 
+def _make_xmlrpc_client(xmlrpc_url: str) -> Client:
+    """PHP 경고문이 섞인 XML-RPC 응답을 정상 처리하는 클라이언트를 반환합니다."""
+    import io
+    import xmlrpc.client as _xc
+
+    _base = _xc.SafeTransport if xmlrpc_url.startswith("https") else _xc.Transport
+
+    class _CleanTransport(_base):
+        def parse_response(self, response):
+            raw = response.read()
+            xml_start = raw.find(b"<?xml")
+            if xml_start > 0:
+                raw = raw[xml_start:]
+            return super().parse_response(io.BytesIO(raw))
+
+    return Client(xmlrpc_url, WP_USERNAME, WP_APP_PASSWORD,
+                  transport=_CleanTransport())
+
+
 def post_to_wordpress(title: str, content: str, status: str = "publish") -> dict:
     """XML-RPC로 워드프레스 포스트를 발행합니다. (Imunify360 REST API 차단 우회)"""
     xmlrpc_url = f"{WP_URL.rstrip('/')}/xmlrpc.php"
-    client = Client(xmlrpc_url, WP_USERNAME, WP_APP_PASSWORD)
+    client = _make_xmlrpc_client(xmlrpc_url)
 
     post = WordPressPost()
     post.title = title

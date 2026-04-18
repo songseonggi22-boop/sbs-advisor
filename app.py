@@ -21,6 +21,9 @@ import openpyxl
 import google.generativeai as genai
 import markdown as md_lib
 from dotenv import load_dotenv
+from wordpress_xmlrpc import Client, WordPressPost
+from wordpress_xmlrpc.methods.posts import NewPost, EditPost
+from wordpress_xmlrpc.methods.media import UploadFile
 
 from design_engine import design, COURSE_ROLES, FIELDS
 from excel_loader import load_courses as _excel_load_courses
@@ -811,35 +814,27 @@ def _bg_worker(interval_secs: int, gemini_key: str, pexels_key: str,
 
 def post_to_wordpress(title: str, content: str, status: str = "publish",
                       featured_media_id: int = 0, date_str: str = "") -> dict:
-    """워드프레스 REST API로 포스트를 발행합니다. (Basic Auth + JSON)
+    """XML-RPC로 워드프레스 포스트를 발행합니다. (Imunify360 REST API 차단 우회)"""
+    xmlrpc_url = f"{WP_URL.rstrip('/')}/xmlrpc.php"
+    client = Client(xmlrpc_url, WP_USERNAME, WP_APP_PASSWORD)
 
-    date_str: ISO 8601 로컬 시간 문자열, 예) "2024-01-15T14:00:00"
-              status="future" 와 함께 사용하면 워드프레스 예약 발행이 됩니다.
-    """
-    endpoint = f"{WP_URL.rstrip('/')}/wp-json/wp/v2/posts"
-    token = base64.b64encode(
-        f"{WP_USERNAME}:{WP_APP_PASSWORD}".encode("utf-8")
-    ).decode("utf-8")
-    payload: dict = {"title": title, "content": content, "status": status}
+    post = WordPressPost()
+    post.title = title
+    post.content = content
+    post.post_status = status
     if featured_media_id:
-        payload["featured_media"] = featured_media_id
+        post.thumbnail = featured_media_id
     if date_str:
-        payload["date"] = date_str          # WP 사이트 로컬 시간 기준
-    body = json.dumps(payload, ensure_ascii=False)
-    resp = requests.post(
-        endpoint,
-        data=body.encode("utf-8"),
-        headers={
-            "Authorization": f"Basic {token}",
-            "Content-Type": "application/json",
-            "Content-Length": str(len(body.encode("utf-8"))),
-            "Accept": "application/json",
-            "User-Agent": "Mozilla/5.0 (compatible; WP-Publisher/1.0)",
-        },
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json()
+        from datetime import datetime as _dt
+        post.date = _dt.fromisoformat(date_str)
+
+    post_id = client.call(NewPost(post))
+
+    # REST API와 동일한 dict 형태로 반환
+    return {
+        "id": int(post_id) if post_id else None,
+        "link": f"{WP_URL.rstrip('/')}/?p={post_id}" if post_id else "",
+    }
 
 
 def instant_publish(kw: str, gemini_key: str, pexels_key: str,

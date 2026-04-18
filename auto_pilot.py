@@ -23,6 +23,8 @@ import google.generativeai as genai
 import markdown as md_lib
 import requests
 from dotenv import load_dotenv
+from wordpress_xmlrpc import Client, WordPressPost
+from wordpress_xmlrpc.methods.posts import NewPost
 
 # ── 환경변수 로드 ──────────────────────────────────────────────────────────────
 load_dotenv()
@@ -93,29 +95,20 @@ def generate_post(keyword: str) -> str:
 
 
 def post_to_wordpress(title: str, content: str, status: str = "publish") -> dict:
-    """워드프레스 REST API로 포스트를 발행합니다. (Basic Auth + JSON)"""
-    endpoint = f"{WP_URL.rstrip('/')}/wp-json/wp/v2/posts"
-    token = base64.b64encode(
-        f"{WP_USERNAME}:{WP_APP_PASSWORD}".encode("utf-8")
-    ).decode("utf-8")
-    body = json.dumps(
-        {"title": title, "content": content, "status": status},
-        ensure_ascii=False,
-    )
-    resp = requests.post(
-        endpoint,
-        data=body.encode("utf-8"),
-        headers={
-            "Authorization": f"Basic {token}",
-            "Content-Type": "application/json",
-            "Content-Length": str(len(body.encode("utf-8"))),
-            "Accept": "application/json",
-            "User-Agent": "Mozilla/5.0 (compatible; WP-Publisher/1.0)",
-        },
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json()
+    """XML-RPC로 워드프레스 포스트를 발행합니다. (Imunify360 REST API 차단 우회)"""
+    xmlrpc_url = f"{WP_URL.rstrip('/')}/xmlrpc.php"
+    client = Client(xmlrpc_url, WP_USERNAME, WP_APP_PASSWORD)
+
+    post = WordPressPost()
+    post.title = title
+    post.content = content
+    post.post_status = status
+
+    post_id = client.call(NewPost(post))
+    return {
+        "id": int(post_id) if post_id else None,
+        "link": f"{WP_URL.rstrip('/')}/?p={post_id}" if post_id else "",
+    }
 
 
 def load_keywords() -> list[str]:

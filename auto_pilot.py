@@ -98,19 +98,20 @@ def post_to_wordpress(title: str, content: str, status: str = "publish") -> dict
     token = base64.b64encode(
         f"{WP_USERNAME}:{WP_APP_PASSWORD}".encode("utf-8")
     ).decode("utf-8")
-    headers = {
-        "Authorization": f"Basic {token}",
-        "Content-Type": "application/json; charset=utf-8",
-        "Accept": "application/json",
-    }
-    payload = json.dumps(
+    body = json.dumps(
         {"title": title, "content": content, "status": status},
         ensure_ascii=False,
-    ).encode("utf-8")
+    )
     resp = requests.post(
         endpoint,
-        headers=headers,
-        data=payload,
+        data=body.encode("utf-8"),
+        headers={
+            "Authorization": f"Basic {token}",
+            "Content-Type": "application/json",
+            "Content-Length": str(len(body.encode("utf-8"))),
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (compatible; WP-Publisher/1.0)",
+        },
         timeout=30,
     )
     resp.raise_for_status()

@@ -820,20 +820,22 @@ def post_to_wordpress(title: str, content: str, status: str = "publish",
     token = base64.b64encode(
         f"{WP_USERNAME}:{WP_APP_PASSWORD}".encode("utf-8")
     ).decode("utf-8")
-    headers = {
-        "Authorization": f"Basic {token}",
-        "Content-Type": "application/json; charset=utf-8",
-        "Accept": "application/json",
-    }
     payload: dict = {"title": title, "content": content, "status": status}
     if featured_media_id:
         payload["featured_media"] = featured_media_id
     if date_str:
         payload["date"] = date_str          # WP 사이트 로컬 시간 기준
+    body = json.dumps(payload, ensure_ascii=False)
     resp = requests.post(
         endpoint,
-        headers=headers,
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        data=body.encode("utf-8"),
+        headers={
+            "Authorization": f"Basic {token}",
+            "Content-Type": "application/json",
+            "Content-Length": str(len(body.encode("utf-8"))),
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (compatible; WP-Publisher/1.0)",
+        },
         timeout=30,
     )
     resp.raise_for_status()

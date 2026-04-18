@@ -812,6 +812,68 @@ def _bg_worker(interval_secs: int, gemini_key: str, pexels_key: str,
         _BG_STATE["next_publish_at"] = 0.0
 
 
+def _wp_browser_publish(title: str, content: str, status: str,
+                         feat_id: int = 0, date_str: str = "",
+                         post_key: str = "wp_default") -> None:
+    """브라우저(클라이언트 IP)에서 WP REST API를 직접 호출합니다.
+    Imunify360 서버 IP 차단을 우회합니다."""
+    import streamlit.components.v1 as _comp
+
+    endpoint   = f"{WP_URL.rstrip('/')}/wp-json/wp/v2/posts"
+    token      = base64.b64encode(
+        f"{WP_USERNAME}:{WP_APP_PASSWORD}".encode("utf-8")
+    ).decode("utf-8")
+
+    payload: dict = {"title": title, "content": content, "status": status}
+    if feat_id:
+        payload["featured_media"] = feat_id
+    if date_str:
+        payload["date"] = date_str
+
+    payload_js = json.dumps(json.dumps(payload, ensure_ascii=False))
+    key_js     = json.dumps(post_key)
+
+    html = f"""<!doctype html><html><body style="margin:0">
+<div id="r" style="padding:10px 14px;border-radius:8px;
+  font:13px/1.5 sans-serif;background:#1e293b;color:#94a3b8">
+  ⏳ WordPress에 전송 중…
+</div>
+<script>
+(async () => {{
+  const KEY = {key_js};
+  const el  = document.getElementById('r');
+  const hit = sessionStorage.getItem(KEY);
+  if (hit) {{ const c=JSON.parse(hit); el.style.cssText=c.s; el.innerHTML=c.h; return; }}
+  try {{
+    const r = await fetch("{endpoint}", {{
+      method: "POST",
+      headers: {{
+        "Authorization": "Basic {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+      }},
+      body: JSON.stringify(JSON.parse({payload_js}))
+    }});
+    const d = await r.json();
+    if (d && d.id) {{
+      el.style.cssText = "padding:10px 14px;border-radius:8px;font:13px/1.5 sans-serif;background:#064e3b;color:#6ee7b7";
+      el.innerHTML = "✅ 완료! 포스트 ID: <b>" + d.id + "</b> &nbsp;"
+        + '<a href="' + d.link + '" target="_blank" style="color:#34d399">글 바로보기 →</a>';
+    }} else {{
+      el.style.cssText = "padding:10px 14px;border-radius:8px;font:13px/1.5 sans-serif;background:#450a0a;color:#fca5a5";
+      el.innerHTML = "❌ " + JSON.stringify(d).slice(0, 300);
+    }}
+  }} catch(e) {{
+    el.style.cssText = "padding:10px 14px;border-radius:8px;font:13px/1.5 sans-serif;background:#450a0a;color:#fca5a5";
+    el.innerHTML = "❌ 오류: " + e.toString();
+  }}
+  sessionStorage.setItem(KEY, JSON.stringify({{s: el.style.cssText, h: el.innerHTML}}));
+}})();
+</script></body></html>"""
+
+    _comp.html(html, height=60)
+
+
 def _make_xmlrpc_client(xmlrpc_url: str) -> Client:
     """PHP 경고문이 섞인 XML-RPC 응답을 정상 처리하는 클라이언트를 반환합니다."""
     import io
@@ -1304,49 +1366,51 @@ if menu == "✍️ 블로그 자동화":
                         )
                 return post_title, html_content, feat_id
 
+            # ── 브라우저 발행 세션 상태 초기화 ───────────────────────────────
+            for _k, _v in [("_wp_pub_ctr", 0), ("_wp_pub_data", None),
+                            ("_wp_draft_ctr", 0), ("_wp_draft_data", None)]:
+                if _k not in st.session_state:
+                    st.session_state[_k] = _v
+
             wp_col1, wp_col2 = st.columns(2)
             with wp_col1:
                 if st.button("🚀 워드프레스에 바로 발행하기", type="primary",
                              use_container_width=True, key="wp_publish"):
-                    with st.spinner("워드프레스에 발행 중..."):
-                        try:
-                            post_title, html_content, feat_id = _build_html_for_wp("publish")
-                            result = post_to_wordpress(
-                                post_title, html_content,
-                                status="publish", featured_media_id=feat_id,
-                            )
-                            if result.get("id"):
-                                st.success(
-                                    f"발행 완료! 포스트 ID: {result.get('id')}  \n"
-                                    f"[글 바로 보기]({result.get('link', '')})"
-                                )
-                            else:
-                                st.warning(f"응답 이상 — API 반환값: {result}")
-                        except requests.HTTPError as e:
-                            st.error(f"발행 실패 (HTTP {e.response.status_code}): {e.response.text[:300]}")
-                        except Exception as e:
-                            st.error(f"발행 실패: {e}")
+                    try:
+                        post_title, html_content, feat_id = _build_html_for_wp("publish")
+                        st.session_state["_wp_pub_ctr"] += 1
+                        st.session_state["_wp_pub_data"] = {
+                            "title": post_title, "content": html_content,
+                            "status": "publish", "feat_id": feat_id,
+                            "key": f"pub_{st.session_state['_wp_pub_ctr']}",
+                        }
+                    except Exception as e:
+                        st.error(f"원고 생성 실패: {e}")
             with wp_col2:
                 if st.button("📝 임시저장(Draft)으로 올리기",
                              use_container_width=True, key="wp_draft"):
-                    with st.spinner("임시저장 중..."):
-                        try:
-                            post_title, html_content, feat_id = _build_html_for_wp("draft")
-                            result = post_to_wordpress(
-                                post_title, html_content,
-                                status="draft", featured_media_id=feat_id,
-                            )
-                            if result.get("id"):
-                                st.success(
-                                    f"임시저장 완료! 포스트 ID: {result.get('id')}  \n"
-                                    f"[글 확인하기]({result.get('link', '')})"
-                                )
-                            else:
-                                st.warning(f"응답 이상 — API 반환값: {result}")
-                        except requests.HTTPError as e:
-                            st.error(f"임시저장 실패 (HTTP {e.response.status_code}): {e.response.text[:300]}")
-                        except Exception as e:
-                            st.error(f"임시저장 실패: {e}")
+                    try:
+                        post_title, html_content, feat_id = _build_html_for_wp("draft")
+                        st.session_state["_wp_draft_ctr"] += 1
+                        st.session_state["_wp_draft_data"] = {
+                            "title": post_title, "content": html_content,
+                            "status": "draft", "feat_id": feat_id,
+                            "key": f"draft_{st.session_state['_wp_draft_ctr']}",
+                        }
+                    except Exception as e:
+                        st.error(f"원고 생성 실패: {e}")
+
+            # ── 브라우저 발행 컴포넌트 렌더링 ────────────────────────────────
+            if st.session_state["_wp_pub_data"]:
+                d = st.session_state["_wp_pub_data"]
+                st.caption("발행 결과 (브라우저에서 직접 전송)")
+                _wp_browser_publish(d["title"], d["content"], d["status"],
+                                    d.get("feat_id", 0), post_key=d["key"])
+            if st.session_state["_wp_draft_data"]:
+                d = st.session_state["_wp_draft_data"]
+                st.caption("임시저장 결과 (브라우저에서 직접 전송)")
+                _wp_browser_publish(d["title"], d["content"], d["status"],
+                                    d.get("feat_id", 0), post_key=d["key"])
         else:
             st.info(
                 "`.env` 파일에 `WP_URL`, `WP_USERNAME`, `WP_APP_PASSWORD`를 설정하면 "

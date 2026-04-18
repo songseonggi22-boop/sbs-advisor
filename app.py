@@ -1295,10 +1295,13 @@ if menu == "✍️ 블로그 자동화":
                                 post_title, html_content,
                                 status="publish", featured_media_id=feat_id,
                             )
-                            st.success(
-                                f"발행 완료! 포스트 ID: {result.get('id')}  \n"
-                                f"[글 바로 보기]({result.get('link', '')})"
-                            )
+                            if result.get("id"):
+                                st.success(
+                                    f"발행 완료! 포스트 ID: {result.get('id')}  \n"
+                                    f"[글 바로 보기]({result.get('link', '')})"
+                                )
+                            else:
+                                st.warning(f"응답 이상 — API 반환값: {result}")
                         except requests.HTTPError as e:
                             st.error(f"발행 실패 (HTTP {e.response.status_code}): {e.response.text[:300]}")
                         except Exception as e:
@@ -1313,10 +1316,13 @@ if menu == "✍️ 블로그 자동화":
                                 post_title, html_content,
                                 status="draft", featured_media_id=feat_id,
                             )
-                            st.success(
-                                f"임시저장 완료! 포스트 ID: {result.get('id')}  \n"
-                                f"[글 확인하기]({result.get('link', '')})"
-                            )
+                            if result.get("id"):
+                                st.success(
+                                    f"임시저장 완료! 포스트 ID: {result.get('id')}  \n"
+                                    f"[글 확인하기]({result.get('link', '')})"
+                                )
+                            else:
+                                st.warning(f"응답 이상 — API 반환값: {result}")
                         except requests.HTTPError as e:
                             st.error(f"임시저장 실패 (HTTP {e.response.status_code}): {e.response.text[:300]}")
                         except Exception as e:

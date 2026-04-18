@@ -954,8 +954,14 @@ if "gen_log" not in st.session_state:
 # 사이드바
 # ══════════════════════════════════════════════════════════════════════════════
 
+try:
+    _my_ip = requests.get("https://api.ipify.org", timeout=5).text.strip()
+except Exception:
+    _my_ip = "확인 불가"
+
 with st.sidebar:
     st.markdown("### 🎓 SBS아카데미 대전지점")
+    st.caption(f"서버 IP: `{_my_ip}`")
     menu = st.radio(
         "메뉴",
         ["📄 패키지 견적서", "✍️ 블로그 자동화", "📅 예약 대시보드"],

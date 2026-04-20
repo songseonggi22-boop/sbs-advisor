@@ -1357,8 +1357,14 @@ if menu == "✍️ 블로그 자동화":
                 img_info = st.session_state.pexels_img_info
                 if img_info.get("url"):
                     if set_featured:
-                        # 이미지를 대표 이미지로만 등록 — 본문 삽입 생략
-                        feat_id = upload_pexels_to_wp_media(img_info, st.session_state.blog_keyword)
+                        # 이미지를 대표 이미지로 등록 시도 — 실패 시 본문 상단 삽입으로 폴백
+                        try:
+                            feat_id = upload_pexels_to_wp_media(img_info, st.session_state.blog_keyword)
+                        except Exception:
+                            # Imunify360 등 서버 차단 시 Pexels URL 직접 삽입
+                            html_content = insert_pexels_image_html(
+                                html_content, img_info, st.session_state.blog_keyword,
+                            )
                     else:
                         # 기존 방식: 본문 상단에 삽입
                         html_content = insert_pexels_image_html(

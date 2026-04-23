@@ -19,7 +19,7 @@ from openpyxl.utils import get_column_letter
 ROOT           = Path(__file__).parent.parent
 WEEKDAY_DIR    = ROOT / "SBS평일"
 WEEKEND_DIR    = ROOT / "SBS주말"
-TEMPLATE_PATH  = Path(r"c:\Users\SBS\Desktop\SBS컴퓨터\★전체시간표 (양식).xlsx")
+TEMPLATE_PATH  = ROOT / "★전체시간표 (양식).xlsx"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 데이터 모델
@@ -318,93 +318,163 @@ def find_price(course_name: str, sheet: str, pm: dict) -> int | None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_excel(student_name: str, cart: list[dict]) -> bytes:
-    thin = Side(style='thin', color='000000')
-    b    = Border(left=thin, right=thin, top=thin, bottom=thin)
-    ca   = Alignment(horizontal='center', vertical='center', wrap_text=True)
-    la   = Alignment(horizontal='left',   vertical='center', wrap_text=True)
+    """★전체시간표 (양식).xlsx 기반으로 개인 시간표를 생성합니다."""
 
-    t_fill  = PatternFill('solid', fgColor='1F4E79')
-    h_fill  = PatternFill('solid', fgColor='2E75B6')
-    wd_fill = PatternFill('solid', fgColor='DBEAFE')
-    we_fill = PatternFill('solid', fgColor='DCFCE7')
-    w_fill  = PatternFill('solid', fgColor='FFFFFF')
-    n_fill  = PatternFill('solid', fgColor='F0F4FA')
-
+    # ── 템플릿 로드 ──────────────────────────────────────────────────────────
     if TEMPLATE_PATH.exists():
         wb = openpyxl.load_workbook(TEMPLATE_PATH)
         ws = wb.active
         for rng in list(ws.merged_cells.ranges):
             ws.unmerge_cells(str(rng))
-        for r in range(1, ws.max_row + 1):
-            for c in range(1, ws.max_column + 1):
-                ws.cell(r, c).value = None
+        ws.delete_rows(1, ws.max_row)
     else:
         wb = openpyxl.Workbook()
         ws = wb.active
     ws.title = f"{student_name} 시간표"
 
-    # 열 너비
-    col_widths = [22, 14, 12, 12, 14, 28, 12]
-    headers    = ['과정명', '구분', '강의실', '시간', '강사', '수업기간', '요일']
-    for i, (w, h) in enumerate(zip(col_widths, headers), 1):
-        ws.column_dimensions[get_column_letter(i)].width = w
+    # ── 공통 스타일 ──────────────────────────────────────────────────────────
+    thin  = Side(style='thin', color='000000')
+    bdr   = Border(left=thin, right=thin, top=thin, bottom=thin)
+    ca    = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    la    = Alignment(horizontal='left',   vertical='center', wrap_text=True)
+    ta    = Alignment(horizontal='left',   vertical='top',    wrap_text=True)
 
-    # 행1: 제목
-    ws.row_dimensions[1].height = 30
-    ws.merge_cells('A1:G1')
+    def fill(color): return PatternFill('solid', fgColor=color)
+    def font(size=10, bold=False, color='000000'):
+        return Font(name='맑은 고딕', size=size, bold=bold, color=color)
+
+    # ── 열 너비 (A~K = 11열, 템플릿 동일) ───────────────────────────────────
+    #   A:번호  B~C:과정명  D~E:수업기간  F~G:시간  H:요일  I:강의실  J:강사  K:(여백)
+    for col, w in zip('ABCDEFGHIJK', [5, 20, 4, 15, 3, 9, 3, 8, 10, 8, 4]):
+        ws.column_dimensions[col].width = w
+
+    row = 1
+
+    # ── 행1~2: 제목 ─────────────────────────────────────────────────────────
+    ws.row_dimensions[1].height = 14
+    ws.row_dimensions[2].height = 14
+    ws.merge_cells(f'A1:K2')
     c = ws.cell(1, 1)
-    c.value, c.font, c.alignment, c.fill, c.border = (
-        f'SBS아카데미  {student_name}  개인 시간표',
-        Font(name='맑은 고딕', size=16, bold=True, color='FFFFFF'),
-        Alignment(horizontal='center', vertical='center'),
-        t_fill, b,
-    )
+    c.value     = f'SBS아카데미  {student_name}  개인 시간표'
+    c.font      = font(16, bold=True, color='FFFFFF')
+    c.alignment = ca
+    c.fill      = fill('1F4E79')
+    c.border    = bdr
+    row = 3
 
-    # 행2: 헤더
-    ws.row_dimensions[2].height = 24
-    for i, h in enumerate(headers, 1):
-        c = ws.cell(2, i)
-        c.value, c.font, c.alignment, c.fill, c.border = (
-            h,
-            Font(name='맑은 고딕', size=10, bold=True, color='FFFFFF'),
-            ca, h_fill, b,
-        )
+    # ── 행3: 연도 ────────────────────────────────────────────────────────────
+    ws.row_dimensions[row].height = 20
+    ws.merge_cells(f'A{row}:K{row}')
+    c = ws.cell(row, 1)
+    c.value     = f'{datetime.now().year}년'
+    c.font      = font(13, bold=True, color='FFFFFF')
+    c.alignment = ca
+    c.fill      = fill('2E75B6')
+    c.border    = bdr
+    row += 1
 
-    # 데이터
-    for ri, item in enumerate(cart, 3):
-        ws.row_dimensions[ri].height = 40
-        row_fill = wd_fill if item['sheet'] == '평일' else we_fill
-        et = item.get('end_time', '')
-        time_str = f"{item['start_time']}~{et}" if et else item['start_time']
-        vals = [
-            item['name'],
-            item['sheet'],
-            item['room'],
-            time_str,
-            item['instructor'],
-            f"{item['start_date']} ~ {item['end_date']}",
-            item['days'],
-        ]
-        for ci, v in enumerate(vals, 1):
-            c = ws.cell(ri, ci)
-            c.value, c.font, c.alignment, c.fill, c.border = (
-                v,
-                Font(name='맑은 고딕', size=10),
-                ca if ci != 6 else la,
-                row_fill if ci == 1 else w_fill,
-                b,
-            )
+    # ── 섹션별 데이터 작성 헬퍼 ─────────────────────────────────────────────
+    COL_HEADERS = ['#', '과정명', '', '수업기간', '', '시간', '', '요일', '강의실', '강사', '']
+    MERGES_HDR  = [('B', 'C'), ('D', 'E'), ('F', 'G')]   # 헤더/데이터 행 병합 쌍
 
-    # 비고
-    note_row = len(cart) + 4
-    ws.row_dimensions[note_row].height = 60
-    ws.merge_cells(f'A{note_row}:G{note_row}')
-    c = ws.cell(note_row, 1)
-    c.value, c.font, c.alignment, c.fill, c.border = (
-        '비고',
-        Font(name='맑은 고딕', size=11, bold=True),
-        la, n_fill, b,
-    )
+    def write_section(label: str, courses: list[dict],
+                      sec_color: str, row_color: str) -> None:
+        nonlocal row
+
+        # 섹션 헤더
+        ws.row_dimensions[row].height = 22
+        ws.merge_cells(f'A{row}:K{row}')
+        c = ws.cell(row, 1)
+        c.value     = f'  {label}'
+        c.font      = font(12, bold=True, color='FFFFFF')
+        c.alignment = la
+        c.fill      = fill(sec_color)
+        c.border    = bdr
+        row += 1
+
+        if not courses:
+            ws.row_dimensions[row].height = 26
+            ws.merge_cells(f'A{row}:K{row}')
+            c = ws.cell(row, 1)
+            c.value     = '(선택된 과목 없음)'
+            c.font      = font(10, color='94A3B8')
+            c.alignment = ca
+            c.fill      = fill('F8FAFC')
+            c.border    = bdr
+            row += 1
+            return
+
+        # 컬럼 헤더 행
+        ws.row_dimensions[row].height = 20
+        h_fill = fill('2E75B6')
+        for ci, h in enumerate(COL_HEADERS, 1):
+            c = ws.cell(row, ci)
+            c.font      = font(9, bold=True, color='FFFFFF')
+            c.alignment = ca
+            c.fill      = h_fill
+            c.border    = bdr
+        for sc, ec in MERGES_HDR:
+            ws.merge_cells(f'{sc}{row}:{ec}{row}')
+        ws.cell(row, 2).value = '과정명'
+        ws.cell(row, 4).value = '수업기간'
+        ws.cell(row, 6).value = '시간'
+        ws.cell(row, 8).value = '요일'
+        ws.cell(row, 9).value = '강의실'
+        ws.cell(row, 10).value = '강사'
+        row += 1
+
+        # 데이터 행
+        for idx, item in enumerate(courses, 1):
+            ws.row_dimensions[row].height = 36
+            et       = item.get('end_time', '')
+            time_str = f"{item['start_time']}~{et}" if et else item['start_time']
+            rf       = fill(row_color)
+
+            data = [
+                idx,
+                item['name'], '',
+                f"{item['start_date']} ~ {item['end_date']}", '',
+                time_str, '',
+                item.get('days', ''),
+                item.get('room', ''),
+                item.get('instructor', ''),
+                '',
+            ]
+            for ci, v in enumerate(data, 1):
+                c = ws.cell(row, ci)
+                c.value     = v
+                c.font      = font(10)
+                c.fill      = rf
+                c.border    = bdr
+                c.alignment = ca
+
+            # 과정명·기간·시간 셀 병합 후 정렬 보정
+            for sc, ec in MERGES_HDR:
+                ws.merge_cells(f'{sc}{row}:{ec}{row}')
+            ws.cell(row, 2).alignment = la   # 과정명 좌측 정렬
+            row += 1
+
+    wd = [item for item in cart if item['sheet'] == '평일']
+    we = [item for item in cart if item['sheet'] == '주말']
+    write_section('평 일', wd, '1F4E79', 'DBEAFE')
+    write_section('주 말', we, '1A6035', 'DCFCE7')
+
+    # ── 비고 행 ──────────────────────────────────────────────────────────────
+    row += 1
+    ws.row_dimensions[row].height = 60
+    c = ws.cell(row, 1)
+    c.value     = '비고'
+    c.font      = font(11, bold=True)
+    c.alignment = ca
+    c.fill      = fill('F0F4FA')
+    c.border    = bdr
+
+    ws.merge_cells(f'B{row}:K{row}')
+    c = ws.cell(row, 2)
+    c.value     = ''
+    c.alignment = ta
+    c.fill      = fill('FFFFFF')
+    c.border    = bdr
 
     buf = io.BytesIO()
     wb.save(buf)

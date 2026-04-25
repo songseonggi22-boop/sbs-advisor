@@ -103,14 +103,32 @@ def _parse_cell_text(text: str) -> tuple[str, str, str, str, str] | None:
     start_date = m_start.group(1) if m_start else ''
     end_date   = m_end.group(1)   if m_end   else ''
 
-    # 강사명 + 요일 패턴
-    # "배정:28윤진3월~목" 또는 "배정:12(W:0,R:1)김혜정5토/일"
-    m_instr = re.search(
-        r'배정:\d+(?:\([^)]*\))?([가-힣]{2,5})\d*([월화수목금토일][~\/][월화수목금토일])',
-        text
-    )
-    instructor = m_instr.group(1) if m_instr else ''
-    days       = m_instr.group(2) if m_instr else ''
+    # 요일: 개: 바로 앞에 있는 요일 문자열 추출
+    # 예) 월~목개: / 화/목개: / 월수금월수개: / 금개:
+    m_days = re.search(r'([월화수목금토일][월화수목금토일~\/]*)개:', text)
+    raw_days = m_days.group(1) if m_days else ''
+
+    # 중복 요일 제거: 월수금월수 → 월수금
+    if raw_days and '~' not in raw_days and '/' not in raw_days:
+        seen_d: set[str] = set()
+        deduped: list[str] = []
+        for c in raw_days:
+            if c not in seen_d:
+                seen_d.add(c)
+                deduped.append(c)
+        days = ''.join(deduped)
+    else:
+        days = raw_days
+
+    # 강사명: 요일 문자열 직전의 한글 2~5자 (선택적)
+    instructor = ''
+    if raw_days:
+        days_pos = text.rfind(raw_days + '개:')
+        if days_pos > 0:
+            before = text[:days_pos]
+            m_instr = re.search(r'([가-힣]{2,5})\s*\d*\s*$', before)
+            if m_instr and m_instr.group(1) not in ('재직자', '수업없음', '정원', '배정'):
+                instructor = m_instr.group(1)
 
     return name, instructor, days, start_date, end_date
 
@@ -320,161 +338,84 @@ def find_price(course_name: str, sheet: str, pm: dict) -> int | None:
 def build_excel(student_name: str, cart: list[dict]) -> bytes:
     """★전체시간표 (양식).xlsx 기반으로 개인 시간표를 생성합니다."""
 
-    # ── 템플릿 로드 ──────────────────────────────────────────────────────────
-    if TEMPLATE_PATH.exists():
-        wb = openpyxl.load_workbook(TEMPLATE_PATH)
-        ws = wb.active
-        for rng in list(ws.merged_cells.ranges):
-            ws.unmerge_cells(str(rng))
-        ws.delete_rows(1, ws.max_row)
-    else:
+    if not TEMPLATE_PATH.exists():
+        buf = io.BytesIO()
         wb = openpyxl.Workbook()
         ws = wb.active
+        ws.cell(1, 1, "템플릿 파일이 없습니다: " + str(TEMPLATE_PATH))
+        wb.save(buf)
+        buf.seek(0)
+        return buf.getvalue()
+
+    # ── 템플릿 로드 (서식·병합·테마 색상 그대로 유지) ────────────────────────
+    wb = openpyxl.load_workbook(TEMPLATE_PATH)
+    ws = wb.active
     ws.title = f"{student_name} 시간표"
 
-    # ── 공통 스타일 ──────────────────────────────────────────────────────────
-    thin  = Side(style='thin', color='000000')
-    bdr   = Border(left=thin, right=thin, top=thin, bottom=thin)
-    ca    = Alignment(horizontal='center', vertical='center', wrap_text=True)
-    la    = Alignment(horizontal='left',   vertical='center', wrap_text=True)
-    ta    = Alignment(horizontal='left',   vertical='top',    wrap_text=True)
+    ca = Alignment(horizontal='center', vertical='center', wrap_text=True)
 
-    def fill(color): return PatternFill('solid', fgColor=color)
-    def font(size=10, bold=False, color='000000'):
-        return Font(name='맑은 고딕', size=size, bold=bold, color=color)
+    # ── 행1~2: 제목 (A1:K2 병합 유지) ──────────────────────────────────────
+    ws['A1'].value     = f'SBS아카데미  {student_name}  개인 시간표'
+    ws['A1'].alignment = ca
 
-    # ── 열 너비 (A~K = 11열, 템플릿 동일) ───────────────────────────────────
-    #   A:번호  B~C:과정명  D~E:수업기간  F~G:시간  H:요일  I:강의실  J:강사  K:(여백)
-    for col, w in zip('ABCDEFGHIJK', [5, 20, 4, 15, 3, 9, 3, 8, 10, 8, 4]):
-        ws.column_dimensions[col].width = w
+    # ── 행3: 연도 (A3:K3 병합 유지) ─────────────────────────────────────────
+    ws['A3'].value     = f'{datetime.now().year}년'
+    ws['A3'].alignment = ca
 
-    row = 1
+    wd_courses = [item for item in cart if item['sheet'] == '평일']
+    we_courses = [item for item in cart if item['sheet'] == '주말']
 
-    # ── 행1~2: 제목 ─────────────────────────────────────────────────────────
-    ws.row_dimensions[1].height = 14
-    ws.row_dimensions[2].height = 14
-    ws.merge_cells(f'A1:K2')
-    c = ws.cell(1, 1)
-    c.value     = f'SBS아카데미  {student_name}  개인 시간표'
-    c.font      = font(16, bold=True, color='FFFFFF')
-    c.alignment = ca
-    c.fill      = fill('1F4E79')
-    c.border    = bdr
-    row = 3
+    def _time_range(courses: list[dict]) -> str:
+        """과정 목록에서 시간대 문자열 생성."""
+        pairs: list[str] = []
+        seen: set[str] = set()
+        for c in courses:
+            st = c.get('start_time', '')
+            et = c.get('end_time', '')
+            if st:
+                label = f"{st}~{et}" if et else st
+                if label not in seen:
+                    seen.add(label)
+                    pairs.append(label)
+        return ' / '.join(pairs) if pairs else '-'
 
-    # ── 행3: 연도 ────────────────────────────────────────────────────────────
-    ws.row_dimensions[row].height = 20
-    ws.merge_cells(f'A{row}:K{row}')
-    c = ws.cell(row, 1)
-    c.value     = f'{datetime.now().year}년'
-    c.font      = font(13, bold=True, color='FFFFFF')
-    c.alignment = ca
-    c.fill      = fill('2E75B6')
-    c.border    = bdr
-    row += 1
+    def _course_cell_text(item: dict) -> str:
+        """하나의 과정을 셀 텍스트로 변환 (줄바꿈 포함)."""
+        lines = [item['name']]
+        st = item.get('start_time', '')
+        et = item.get('end_time', '')
+        if st:
+            lines.append(f"{st}{'~'+et if et else ''}")
+        sd = item.get('start_date', '')
+        ed = item.get('end_date', '')
+        if sd or ed:
+            lines.append(f"{sd}~{ed}" if sd and ed else sd or ed)
+        return '\n'.join(lines)
 
-    # ── 섹션별 데이터 작성 헬퍼 ─────────────────────────────────────────────
-    COL_HEADERS = ['#', '과정명', '', '수업기간', '', '시간', '', '요일', '강의실', '강사', '']
-    MERGES_HDR  = [('B', 'C'), ('D', 'E'), ('F', 'G')]   # 헤더/데이터 행 병합 쌍
+    # ── 행4: 평일 헤더 (서식 유지, 값 없음) ─────────────────────────────────
+    # ws['A4'] 값 '평일'은 템플릿 그대로 유지
 
-    def write_section(label: str, courses: list[dict],
-                      sec_color: str, row_color: str) -> None:
-        nonlocal row
+    # ── 행5: 평일 과정 (A5=시간대, B5-K5=과정 수평 배치) ────────────────────
+    ws['A5'].value     = _time_range(wd_courses) if wd_courses else '-'
+    ws['A5'].alignment = ca
+    for col_i, item in enumerate(wd_courses[:10], start=2):   # B=2 … K=11
+        cell = ws.cell(5, col_i)
+        cell.value     = _course_cell_text(item)
+        cell.alignment = ca
 
-        # 섹션 헤더
-        ws.row_dimensions[row].height = 22
-        ws.merge_cells(f'A{row}:K{row}')
-        c = ws.cell(row, 1)
-        c.value     = f'  {label}'
-        c.font      = font(12, bold=True, color='FFFFFF')
-        c.alignment = la
-        c.fill      = fill(sec_color)
-        c.border    = bdr
-        row += 1
+    # ── 행6: 주말 헤더 (서식 유지, 값 없음) ─────────────────────────────────
+    # ws['A6'] 값 '주말'은 템플릿 그대로 유지
 
-        if not courses:
-            ws.row_dimensions[row].height = 26
-            ws.merge_cells(f'A{row}:K{row}')
-            c = ws.cell(row, 1)
-            c.value     = '(선택된 과목 없음)'
-            c.font      = font(10, color='94A3B8')
-            c.alignment = ca
-            c.fill      = fill('F8FAFC')
-            c.border    = bdr
-            row += 1
-            return
+    # ── 행7: 주말 과정 (A7=시간대, B7-K7=과정 수평 배치) ────────────────────
+    ws['A7'].value     = _time_range(we_courses) if we_courses else '-'
+    ws['A7'].alignment = ca
+    for col_i, item in enumerate(we_courses[:10], start=2):
+        cell = ws.cell(7, col_i)
+        cell.value     = _course_cell_text(item)
+        cell.alignment = ca
 
-        # 컬럼 헤더 행
-        ws.row_dimensions[row].height = 20
-        h_fill = fill('2E75B6')
-        for ci, h in enumerate(COL_HEADERS, 1):
-            c = ws.cell(row, ci)
-            c.font      = font(9, bold=True, color='FFFFFF')
-            c.alignment = ca
-            c.fill      = h_fill
-            c.border    = bdr
-        for sc, ec in MERGES_HDR:
-            ws.merge_cells(f'{sc}{row}:{ec}{row}')
-        ws.cell(row, 2).value = '과정명'
-        ws.cell(row, 4).value = '수업기간'
-        ws.cell(row, 6).value = '시간'
-        ws.cell(row, 8).value = '요일'
-        ws.cell(row, 9).value = '강의실'
-        ws.cell(row, 10).value = '강사'
-        row += 1
-
-        # 데이터 행
-        for idx, item in enumerate(courses, 1):
-            ws.row_dimensions[row].height = 36
-            et       = item.get('end_time', '')
-            time_str = f"{item['start_time']}~{et}" if et else item['start_time']
-            rf       = fill(row_color)
-
-            data = [
-                idx,
-                item['name'], '',
-                f"{item['start_date']} ~ {item['end_date']}", '',
-                time_str, '',
-                item.get('days', ''),
-                item.get('room', ''),
-                item.get('instructor', ''),
-                '',
-            ]
-            for ci, v in enumerate(data, 1):
-                c = ws.cell(row, ci)
-                c.value     = v
-                c.font      = font(10)
-                c.fill      = rf
-                c.border    = bdr
-                c.alignment = ca
-
-            # 과정명·기간·시간 셀 병합 후 정렬 보정
-            for sc, ec in MERGES_HDR:
-                ws.merge_cells(f'{sc}{row}:{ec}{row}')
-            ws.cell(row, 2).alignment = la   # 과정명 좌측 정렬
-            row += 1
-
-    wd = [item for item in cart if item['sheet'] == '평일']
-    we = [item for item in cart if item['sheet'] == '주말']
-    write_section('평 일', wd, '1F4E79', 'DBEAFE')
-    write_section('주 말', we, '1A6035', 'DCFCE7')
-
-    # ── 비고 행 ──────────────────────────────────────────────────────────────
-    row += 1
-    ws.row_dimensions[row].height = 60
-    c = ws.cell(row, 1)
-    c.value     = '비고'
-    c.font      = font(11, bold=True)
-    c.alignment = ca
-    c.fill      = fill('F0F4FA')
-    c.border    = bdr
-
-    ws.merge_cells(f'B{row}:K{row}')
-    c = ws.cell(row, 2)
-    c.value     = ''
-    c.alignment = ta
-    c.fill      = fill('FFFFFF')
-    c.border    = bdr
+    # ── 행8~9: 구분선·비고 (템플릿 서식 유지) ────────────────────────────────
+    # 변경 없음 — 템플릿 그대로 출력
 
     buf = io.BytesIO()
     wb.save(buf)

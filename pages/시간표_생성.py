@@ -64,6 +64,54 @@ class CourseEntry:
 # 파싱
 # ══════════════════════════════════════════════════════════════════════════════
 
+_DAY_ORDER = ['월', '화', '수', '목', '금', '토', '일']
+
+def _days_to_set(days: str) -> set[str]:
+    """요일 문자열 → 개별 요일 집합.
+    월~목 → {월,화,수,목} / 화/목 → {화,목} / 월수금 → {월,수,금}
+    """
+    if not days:
+        return set()
+    result: set[str] = set()
+    if '~' in days:
+        parts = days.split('~')
+        if len(parts) == 2:
+            try:
+                s = _DAY_ORDER.index(parts[0])
+                e = _DAY_ORDER.index(parts[1])
+                for i in range(min(s, e), max(s, e) + 1):
+                    result.add(_DAY_ORDER[i])
+            except ValueError:
+                pass
+    else:
+        for c in days.replace('/', ''):
+            if c in _DAY_ORDER:
+                result.add(c)
+    return result
+
+
+def _days_badge_html(days: str) -> str:
+    """월화수목금토일 각각을 활성/비활성 뱃지로 렌더링."""
+    active = _days_to_set(days)
+    parts = []
+    for d in _DAY_ORDER:
+        if d in active:
+            parts.append(
+                f"<span style='display:inline-flex;align-items:center;justify-content:center;"
+                f"width:1.45rem;height:1.45rem;border-radius:50%;"
+                f"background:#1F4E79;color:#fff;font-size:.72rem;font-weight:800;"
+                f"margin:0 .08rem;'>{d}</span>"
+            )
+        else:
+            parts.append(
+                f"<span style='display:inline-flex;align-items:center;justify-content:center;"
+                f"width:1.45rem;height:1.45rem;border-radius:50%;"
+                f"background:#e2e8f0;color:#94a3b8;font-size:.72rem;font-weight:500;"
+                f"margin:0 .08rem;'>{d}</span>"
+            )
+    return ''.join(parts)
+
+
 def _calc_end_time(start_time: str, rowspan: int) -> str:
     """시작 시간(HH:MM) + rowspan × 30분 → 종료 시간."""
     from datetime import timedelta
@@ -682,7 +730,7 @@ with col_left:
                         f"</div>"
                         f"<div class='course-detail-row'>"
                         f"<span>👨‍🏫 {e.instructor or '미정'}</span>"
-                        f"<span>📆 {e.days or '-'}</span>"
+                        f"<span style='display:inline-flex;align-items:center;gap:.1rem'>{_days_badge_html(e.days)}</span>"
                         f"<span class='period-text'>🗓 {period_str}</span>"
                         f"</div>"
                         f"</div>"
@@ -773,8 +821,8 @@ with col_right:
                     f"<div class='cart-meta'>"
                     f"⏰ {item['start_time']}{'~'+item['end_time'] if item.get('end_time') else ''} &nbsp;·&nbsp; "
                     f"📍 {item['room']} &nbsp;·&nbsp; "
-                    f"👨‍🏫 {item['instructor'] or '미정'} &nbsp;·&nbsp; "
-                    f"📆 {item['days'] or '-'}<br>"
+                    f"👨‍🏫 {item['instructor'] or '미정'} &nbsp;&nbsp;"
+                    f"{_days_badge_html(item.get('days',''))}<br>"
                     f"<span class='cart-period'>🗓 {period_str}</span>"
                     f"</div></div>",
                     unsafe_allow_html=True,

@@ -17,8 +17,11 @@ from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.utils import get_column_letter
 
 ROOT           = Path(__file__).parent.parent
-WEEKDAY_DIR    = ROOT / "SBS평일"
-WEEKEND_DIR    = ROOT / "SBS주말"
+# sbs시간표 최신화/ 를 단일 데이터 소스로 사용
+# 폴더가 없으면 레거시 SBS평일/ 폴더로 폴백
+_LATEST_DIR    = ROOT / "sbs시간표 최신화"
+WEEKDAY_DIR    = _LATEST_DIR if _LATEST_DIR.exists() else ROOT / "SBS평일"
+WEEKEND_DIR    = ROOT / "SBS주말"   # optional — 없어도 에러 없음
 TEMPLATE_PATH  = ROOT / "★전체시간표 (양식).xlsx"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -248,7 +251,7 @@ def _load_xls_file(fp: Path, sheet: str) -> list[CourseEntry]:
 
 @st.cache_resource(show_spinner=False)
 def load_all_courses() -> list[CourseEntry]:
-    """SBS평일, SBS주말 폴더의 모든 .xls 파일 파싱."""
+    """WEEKDAY_DIR(sbs시간표 최신화 or SBS평일), SBS주말 폴더의 모든 .xls 파일 파싱."""
     all_entries: list[CourseEntry] = []
 
     for folder, sheet in [(WEEKDAY_DIR, '평일'), (WEEKEND_DIR, '주말')]:
@@ -283,7 +286,7 @@ def search_courses(entries: list[CourseEntry], keyword: str) -> list[CourseEntry
 # 수강료 로드 & 매칭
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.cache_resource(show_spinner=False)
+@st.cache_data(show_spinner=False)
 def load_price_map() -> dict:
     """수강료.xlsx → {과정명: {'평일': 가격, '주말': 가격}} 딕셔너리."""
     fp = ROOT / "수강료.xlsx"
@@ -430,10 +433,14 @@ def build_excel(student_name: str, cart: list[dict]) -> bytes:
     def _course_cell_text(item: dict) -> str:
         """하나의 과정을 셀 텍스트로 변환 (줄바꿈 포함)."""
         lines = [item['name']]
+        days = item.get('days', '')
         st = item.get('start_time', '')
         et = item.get('end_time', '')
-        if st:
-            lines.append(f"{st}{'~'+et if et else ''}")
+        time_str = f"{st}{'~'+et if et else ''}" if st else ''
+        if days and time_str:
+            lines.append(f"{days}  {time_str}")
+        elif time_str:
+            lines.append(time_str)
         sd = item.get('start_date', '')
         ed = item.get('end_date', '')
         if sd or ed:
@@ -489,93 +496,98 @@ html,body,[class*="css"]{font-family:'Noto Sans KR',sans-serif;}
 /* ── 상단 헤더 ── */
 .sbs-header{
   background:linear-gradient(120deg,#1e3a5f 0%,#1F4E79 60%,#2563a8 100%);
-  padding:1.1rem 1.8rem;border-radius:12px;margin-bottom:1rem;
+  padding:1.1rem 1.8rem;border-radius:12px;margin-bottom:.8rem;
   box-shadow:0 4px 20px rgba(31,78,121,.28);
 }
 .sbs-header h1{margin:0;color:#fff;font-size:1.35rem;font-weight:900;}
 .sbs-header p{margin:.2rem 0 0;color:rgba(255,255,255,.78);font-size:.84rem;}
 
-/* ── 월 구분 헤더 ── */
-.month-header{
-  display:flex;align-items:center;gap:.6rem;
-  background:linear-gradient(90deg,#1e3a5f,#2563a8 80%,transparent 100%);
-  color:#fff;border-radius:8px;padding:.45rem 1rem;
-  margin:1.1rem 0 .45rem;
+/* ── 요일 필터 ── */
+.day-filter-wrap{
+  display:flex;align-items:center;gap:.35rem;
+  background:#f8fafc;border:1.5px solid #e2e8f0;
+  border-radius:10px;padding:.45rem .8rem;margin-bottom:.6rem;
 }
-.month-title{font-size:1.05rem;font-weight:900;letter-spacing:-.3px;}
-.month-cnt{
-  background:rgba(255,255,255,.22);border-radius:20px;
-  padding:.05rem .55rem;font-size:.75rem;font-weight:700;
-}
+.day-filter-label{font-size:.78rem;font-weight:700;color:#64748b;white-space:nowrap;}
 
-/* ── 과정 카드 ── */
-.course-card{
-  border-left:4px solid #ccc;
-  background:#fff;border-radius:0 9px 9px 0;
-  padding:.6rem .9rem .5rem;margin-bottom:.35rem;
-  box-shadow:0 1px 4px rgba(0,0,0,.07);
-  transition:box-shadow .15s;
+/* ── 결과 테이블 ── */
+.tbl-wrap{
+  border:1.5px solid #e2e8f0;border-radius:10px;
+  overflow:hidden;margin-top:.3rem;
 }
-.course-card:hover{box-shadow:0 3px 12px rgba(0,0,0,.12);}
-.course-card.wd{border-left-color:#2563a8;}
-.course-card.we{border-left-color:#059669;}
+.tbl-head{
+  display:grid;
+  grid-template-columns: 2.6fr 1.5fr 1.4fr 1.1fr 1.1fr 0.8fr;
+  background:#1e3a5f;padding:.45rem .6rem;
+  font-size:.76rem;font-weight:800;color:#fff;gap:.3rem;
+}
+.tbl-row{
+  display:grid;
+  grid-template-columns: 2.6fr 1.5fr 1.4fr 1.1fr 1.1fr 0.8fr;
+  padding:.42rem .6rem;gap:.3rem;align-items:center;
+  border-bottom:1px solid #f1f5f9;
+  transition:background .1s;
+}
+.tbl-row:last-child{border-bottom:none;}
+.tbl-row:hover{background:#f0f7ff;}
+.tbl-row.we-row{border-left:3px solid #059669;}
+.tbl-row.wd-row{border-left:3px solid #2563a8;}
 
-.course-title-row{
-  display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;
-  margin-bottom:.3rem;
+.c-name{font-size:.88rem;font-weight:800;color:#0f172a;line-height:1.3;}
+.c-sheet{
+  display:inline-block;border-radius:4px;padding:1px 5px;
+  font-size:.65rem;font-weight:700;margin-left:.3rem;vertical-align:middle;
 }
-.course-name{font-size:.98rem;font-weight:800;color:#0f172a;}
-.badge{
-  display:inline-flex;align-items:center;
-  border-radius:5px;padding:.05rem .4rem;
-  font-size:.72rem;font-weight:700;white-space:nowrap;
-}
-.badge-wd{background:#dbeafe;color:#1d4ed8;}
-.badge-we{background:#dcfce7;color:#15803d;}
-.badge-time{background:#f1f5f9;color:#475569;}
-.badge-room{background:#fef3c7;color:#92400e;}
+.c-sheet-wd{background:#dbeafe;color:#1d4ed8;}
+.c-sheet-we{background:#dcfce7;color:#059669;}
+.c-days{font-size:.84rem;font-weight:700;color:#1d4ed8;letter-spacing:.5px;}
+.c-days-we{color:#059669;}
+.c-time{font-size:.82rem;color:#374151;}
+.c-date{font-size:.79rem;color:#475569;}
+.c-room{font-size:.75rem;color:#92400e;background:#fef3c7;
+  border-radius:4px;padding:1px 5px;display:inline-block;}
 
-.course-detail-row{
-  display:flex;align-items:center;flex-wrap:wrap;gap:.5rem 1.2rem;
-  font-size:.79rem;color:#64748b;line-height:1.5;
+/* ── 요일 원형 뱃지 (소형) ── */
+.day-dot{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:1.3rem;height:1.3rem;border-radius:50%;
+  font-size:.68rem;font-weight:800;margin:0 .05rem;
 }
-.period-text{font-weight:700;color:#1e3a5f;}
+.day-dot.on-wd{background:#1F4E79;color:#fff;}
+.day-dot.on-we{background:#059669;color:#fff;}
+.day-dot.off{background:#e2e8f0;color:#94a3b8;}
 
 /* ── 장바구니 카드 ── */
 .cart-card{
   background:#f0f7ff;border:1.5px solid #bfdbfe;
   border-left:4px solid #2563a8;
-  border-radius:0 9px 9px 0;padding:.55rem .9rem;margin-bottom:.4rem;
+  border-radius:0 9px 9px 0;padding:.5rem .85rem;margin-bottom:.35rem;
 }
 .cart-card.we{border-left-color:#059669;background:#f0fdf4;border-color:#bbf7d0;}
-.cart-name{font-weight:800;color:#1e40af;font-size:.93rem;}
-.cart-meta{font-size:.77rem;color:#64748b;line-height:1.7;margin-top:.15rem;}
+.cart-name{font-weight:800;color:#1e40af;font-size:.90rem;}
+.cart-meta{font-size:.76rem;color:#64748b;line-height:1.7;margin-top:.12rem;}
 .cart-period{font-weight:700;color:#1e3a5f;}
+.cart-days{font-weight:700;color:#1d4ed8;font-size:.78rem;}
 
 .price-tag{
   margin-left:auto;
   background:#fef9c3;color:#78350f;
   border:1.5px solid #fde68a;border-radius:6px;
-  padding:.08rem .6rem;font-size:.85rem;font-weight:900;
+  padding:.06rem .55rem;font-size:.82rem;font-weight:900;
   white-space:nowrap;letter-spacing:-.5px;
 }
 .price-tag.free{background:#dcfce7;color:#15803d;border-color:#bbf7d0;}
 .price-tag.unknown{background:#f1f5f9;color:#94a3b8;border-color:#e2e8f0;font-weight:500;}
 
-/* 장바구니 합계 */
 .cart-total{
   background:linear-gradient(90deg,#1e3a5f,#2563a8);
-  color:#fff;border-radius:8px;padding:.55rem 1rem;
+  color:#fff;border-radius:8px;padding:.5rem 1rem;
   display:flex;justify-content:space-between;align-items:center;
   margin-bottom:.5rem;
 }
-.cart-total-label{font-size:.82rem;opacity:.85;}
-.cart-total-amount{font-size:1.1rem;font-weight:900;letter-spacing:-.5px;}
+.cart-total-label{font-size:.80rem;opacity:.85;}
+.cart-total-amount{font-size:1.05rem;font-weight:900;letter-spacing:-.5px;}
 
-.tag{
-  display:inline-block;border-radius:5px;
-  padding:.06rem .38rem;font-size:.7rem;font-weight:700;margin-right:.25rem;
-}
 .stButton>button{border-radius:8px!important;}
 .stDownloadButton>button{
   background:#1F4E79!important;color:#fff!important;
@@ -584,16 +596,24 @@ html,body,[class*="css"]{font-family:'Noto Sans KR',sans-serif;}
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("""
+_hdr_col, _refresh_col = st.columns([5, 1])
+with _hdr_col:
+    st.markdown("""
 <div class="sbs-header">
-  <h1>🔍 과정 검색 · 개인 시간표 생성</h1>
-  <p>과정명을 입력하면 개강일 · 종강일 · 강사 · 강의실을 즉시 확인할 수 있습니다</p>
+  <h1>🔍 SBS아카데미 강의 시간표 검색</h1>
+  <p>과정명 검색 + 요일 필터로 원하는 강의를 빠르게 찾아보세요</p>
 </div>
 """, unsafe_allow_html=True)
+with _refresh_col:
+    st.markdown("<div style='margin-top:.6rem'></div>", unsafe_allow_html=True)
+    if st.button('🔄 새로고침', help='시간표 파일이 업데이트됐을 때 캐시를 지우고 다시 불러옵니다.',
+                 use_container_width=True):
+        load_all_courses.clear()
+        st.rerun()
 
 # ── 데이터 체크 ───────────────────────────────────────────────────────────────
-if not WEEKDAY_DIR.exists() and not WEEKEND_DIR.exists():
-    st.error('⚠️ SBS평일 / SBS주말 폴더를 프로젝트 루트에 넣어주세요.')
+if not WEEKDAY_DIR.exists():
+    st.error(f'⚠️ 시간표 폴더를 찾을 수 없습니다: {WEEKDAY_DIR}')
     st.stop()
 
 all_courses = load_all_courses()
@@ -601,11 +621,27 @@ if not all_courses:
     st.error('⚠️ 강의시간표 파일을 읽을 수 없습니다.')
     st.stop()
 
+# ── 로드 현황 표시 ─────────────────────────────────────────────────────────────
+_wd_cnt  = sum(1 for c in all_courses if c.sheet == '평일')
+_we_cnt  = sum(1 for c in all_courses if c.sheet == '주말')
+_src_dir = WEEKDAY_DIR.name
+_xls_cnt = len(list(WEEKDAY_DIR.glob('*.xls')))
+st.markdown(
+    f"<p style='font-size:.75rem;color:#64748b;margin:.0rem 0 .5rem'>"
+    f"📂 데이터 소스: <b>{_src_dir}/</b> ({_xls_cnt}개 파일) &nbsp;·&nbsp; "
+    f"평일 <b style='color:#1d4ed8'>{_wd_cnt}</b>개"
+    + (f" &nbsp;·&nbsp; 주말 <b style='color:#059669'>{_we_cnt}</b>개" if _we_cnt else "")
+    + "</p>",
+    unsafe_allow_html=True,
+)
+
 price_map = load_price_map()
 
 # ── 세션 상태 ─────────────────────────────────────────────────────────────────
 if 'cart' not in st.session_state:
     st.session_state.cart = []
+if 'sel_day' not in st.session_state:
+    st.session_state.sel_day = '전체'
 
 
 def add_to_cart(e: CourseEntry, price: int | None):
@@ -629,142 +665,159 @@ def add_to_cart(e: CourseEntry, price: int | None):
         })
 
 
+def _in_cart(e: CourseEntry) -> bool:
+    key = (e.name, e.room, e.start_time, e.start_date)
+    return any(
+        (c['name'], c['room'], c['start_time'], c['start_date']) == key
+        for c in st.session_state.cart
+    )
+
+
+def _filter_by_day(entries: list, day: str) -> list:
+    """요일 필터 적용."""
+    if not day or day == '전체':
+        return entries
+    if day == '주말':
+        return [e for e in entries if _days_to_set(e.days) & {'토', '일'}]
+    if day == '평일만':
+        return [e for e in entries if _days_to_set(e.days) - {'토', '일'}]
+    return [e for e in entries if day in _days_to_set(e.days)]
+
+
+def _days_badge_row(days: str, is_we: bool = False) -> str:
+    """요일 원형 뱃지 행 HTML (소형)."""
+    active = _days_to_set(days)
+    on_cls = 'on-we' if is_we else 'on-wd'
+    parts = []
+    for d in _DAY_ORDER:
+        cls = on_cls if d in active else 'off'
+        parts.append(f"<span class='day-dot {cls}'>{d}</span>")
+    return ''.join(parts)
+
+
+def _fmt_date(d: str) -> str:
+    """YYYY-MM-DD → M/D"""
+    try:
+        dt = datetime.strptime(d, "%Y-%m-%d")
+        return f"{dt.month}/{dt.day}"
+    except Exception:
+        return d
+
+
 # ── 레이아웃 ──────────────────────────────────────────────────────────────────
 col_left, col_right = st.columns([3, 2], gap='large')
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 왼쪽: 검색 (월별 그룹핑)
+# 왼쪽: 검색 + 요일 필터 + 테이블
 # ══════════════════════════════════════════════════════════════════════════════
 with col_left:
-    st.markdown('### 🔍 과정 검색')
 
+    # ── 검색바 ──────────────────────────────────────────────────────────────
     keyword = st.text_input(
-        '과정명 입력',
-        placeholder='에펙, 캐드, 마야, 컴활, 포토샵 ...',
+        '과정명 검색',
+        placeholder='예) 에펙, 캐드, 마야, 포토샵, 컴활 …  (빈칸 = 전체 보기)',
         label_visibility='collapsed',
     )
 
-    if keyword.strip():
-        results = search_courses(all_courses, keyword)
+    # ── 요일 필터 버튼 ────────────────────────────────────────────────────
+    DAY_FILTERS = ['전체', '월', '화', '수', '목', '금', '토', '일', '주말', '평일만']
+    st.markdown("<div style='margin-bottom:.2rem;font-size:.77rem;font-weight:700;color:#475569'>📅 요일 필터</div>", unsafe_allow_html=True)
+    day_cols = st.columns(len(DAY_FILTERS))
+    for col, label in zip(day_cols, DAY_FILTERS):
+        is_active = st.session_state.sel_day == label
+        btn_type = 'primary' if is_active else 'secondary'
+        if col.button(label, key=f'dayf_{label}', type=btn_type, use_container_width=True):
+            st.session_state.sel_day = label
+            st.rerun()
 
-        if not results:
-            st.markdown(
-                "<div style='background:#fff7ed;border:1.5px solid #fed7aa;"
-                "border-radius:9px;padding:1rem 1.2rem;color:#9a3412;font-size:.88rem'>"
-                "검색 결과가 없습니다. 다른 키워드를 입력해 보세요.</div>",
-                unsafe_allow_html=True,
-            )
-        else:
-            # ── 월별 그룹핑 ───────────────────────────────────────────────
-            from collections import defaultdict
-            groups: dict[tuple, list] = defaultdict(list)
-            for e in results:
-                try:
-                    s = datetime.strptime(e.start_date, "%Y-%m-%d")
-                    key = (s.year, s.month)
-                except Exception:
-                    key = (0, 0)
-                groups[key].append(e)
+    st.markdown("<div style='margin:.3rem 0'></div>", unsafe_allow_html=True)
 
-            total = len(results)
-            months = len(groups)
-            st.markdown(
-                f"<p style='color:#64748b;font-size:.83rem;margin:.2rem 0 .1rem'>"
-                f"<b style='color:#1e3a5f'>{total}개</b> 검색됨 &nbsp;·&nbsp; "
-                f"<b style='color:#1e3a5f'>{months}개월</b> 기간</p>",
-                unsafe_allow_html=True,
-            )
+    # ── 데이터 필터링 ──────────────────────────────────────────────────────
+    kw = keyword.strip()
+    base = search_courses(all_courses, kw) if kw else list(all_courses)
+    results = _filter_by_day(base, st.session_state.sel_day)
 
-            for (yr, mo), group_entries in sorted(groups.items()):
-                # 월 헤더
-                if yr == 0:
-                    month_label = "날짜 미정"
-                else:
-                    month_label = f"{yr}년 &nbsp;{mo}월"
+    # ── 결과 통계 ──────────────────────────────────────────────────────────
+    wd_cnt = sum(1 for e in results if e.sheet == '평일')
+    we_cnt = sum(1 for e in results if e.sheet == '주말')
+    stat_parts = [f"<b style='color:#1e3a5f'>{len(results)}개</b> 과정"]
+    if wd_cnt:
+        stat_parts.append(f"<span style='color:#1d4ed8'>평일 {wd_cnt}</span>")
+    if we_cnt:
+        stat_parts.append(f"<span style='color:#059669'>주말 {we_cnt}</span>")
+    st.markdown(
+        f"<p style='font-size:.80rem;color:#64748b;margin:.1rem 0 .4rem'>"
+        + " &nbsp;·&nbsp; ".join(stat_parts) + "</p>",
+        unsafe_allow_html=True,
+    )
 
+    if not results:
+        st.markdown(
+            "<div style='background:#fff7ed;border:1.5px solid #fed7aa;"
+            "border-radius:9px;padding:1rem 1.2rem;color:#9a3412;font-size:.88rem'>"
+            "검색 결과가 없습니다. 키워드나 요일 필터를 변경해 보세요.</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        # ── 테이블 헤더 ─────────────────────────────────────────────────
+        st.markdown(
+            "<div class='tbl-wrap'>"
+            "<div class='tbl-head'>"
+            "<span>과정명</span>"
+            "<span>요일</span>"
+            "<span>시간</span>"
+            "<span>개강일</span>"
+            "<span>종강일</span>"
+            "<span>강의실</span>"
+            "</div></div>",
+            unsafe_allow_html=True,
+        )
+
+        # ── 테이블 행 (각 과정) ─────────────────────────────────────────
+        for e in results:
+            is_we     = e.sheet == '주말'
+            row_cls   = 'we-row' if is_we else 'wd-row'
+            days_cls  = 'c-days-we' if is_we else 'c-days'
+            sheet_cls = 'c-sheet-we' if is_we else 'c-sheet-wd'
+            _et       = getattr(e, 'end_time', '') or ''
+            time_str  = f"{e.start_time}~{_et}" if _et else e.start_time
+            price     = find_price(e.name, e.sheet, price_map)
+            in_cart   = _in_cart(e)
+
+            # HTML 정보 행 + Streamlit 버튼 열
+            info_col, btn_col = st.columns([11, 1])
+            with info_col:
                 st.markdown(
-                    f"<div class='month-header'>"
-                    f"<span class='month-title'>📅 {month_label}</span>"
-                    f"<span class='month-cnt'>{len(group_entries)}개 과정</span>"
+                    f"<div class='tbl-row {row_cls}'>"
+                    # 과정명
+                    f"<span><span class='c-name'>{e.name}</span>"
+                    f"<span class='c-sheet {sheet_cls}'>{e.sheet}</span></span>"
+                    # 요일 (원형 뱃지)
+                    f"<span>{_days_badge_row(e.days, is_we)}</span>"
+                    # 시간
+                    f"<span class='c-time'>⏰ {time_str}</span>"
+                    # 개강일
+                    f"<span class='c-date'>📅 {_fmt_date(e.start_date)}</span>"
+                    # 종강일
+                    f"<span class='c-date'>🏁 {_fmt_date(e.end_date)}</span>"
+                    # 강의실
+                    f"<span><span class='c-room'>📍{e.room}</span></span>"
                     f"</div>",
                     unsafe_allow_html=True,
                 )
-
-                # 해당 월의 과정 목록
-                for e in group_entries:
-                    is_wd     = e.sheet == '평일'
-                    card_cls  = 'wd' if is_wd else 'we'
-                    badge_cls = 'badge-wd' if is_wd else 'badge-we'
-
-                    # 날짜 포맷
-                    try:
-                        sd = datetime.strptime(e.start_date, "%Y-%m-%d")
-                        ed = datetime.strptime(e.end_date,   "%Y-%m-%d")
-                        if sd.month == ed.month:
-                            period_str = f"{sd.month}월 {sd.day}일 ~ {ed.day}일"
-                        else:
-                            period_str = f"{sd.month}월 {sd.day}일 ~ {ed.month}월 {ed.day}일"
-                    except Exception:
-                        period_str = e.period_label
-
-                    # 수강료
-                    price     = find_price(e.name, e.sheet, price_map)
-                    if price == -1:
-                        price_html = "<span class='price-tag free'>국비훈련 무료</span>"
-                        price_disp = -1
-                    elif price:
-                        price_html = f"<span class='price-tag'>{price:,}원</span>"
-                        price_disp = price
-                    else:
-                        price_html = "<span class='price-tag unknown'>수강료 문의</span>"
-                        price_disp = None
-
-                    info_html = (
-                        f"<div class='course-card {card_cls}'>"
-                        f"<div class='course-title-row'>"
-                        f"<span class='course-name'>{e.name}</span>"
-                        f"<span class='badge {badge_cls}'>{e.sheet}</span>"
-                        f"<span class='badge badge-time'>⏰ {e.start_time}{'~'+e.end_time if e.end_time else ''}</span>"
-                        f"<span class='badge badge-room'>📍 {e.room}</span>"
-                        f"{price_html}"
-                        f"</div>"
-                        f"<div class='course-detail-row'>"
-                        f"<span>👨‍🏫 {e.instructor or '미정'}</span>"
-                        f"<span style='display:inline-flex;align-items:center;gap:.1rem'>{_days_badge_html(e.days)}</span>"
-                        f"<span class='period-text'>🗓 {period_str}</span>"
-                        f"</div>"
-                        f"</div>"
+            with btn_col:
+                if in_cart:
+                    st.markdown(
+                        "<div style='text-align:center;color:#059669;font-size:1.1rem;"
+                        "font-weight:900;padding-top:.3rem'>✓</div>",
+                        unsafe_allow_html=True,
                     )
-
-                    col_card, col_btn = st.columns([5, 1])
-                    with col_card:
-                        st.markdown(info_html, unsafe_allow_html=True)
-                    with col_btn:
-                        st.markdown("<div style='margin-top:.35rem'></div>", unsafe_allow_html=True)
-                        btn_key = f"add_{e.name}_{e.room}_{e.start_date}_{e.start_time}"
-                        if st.button('＋ 추가', key=btn_key, use_container_width=True):
-                            add_to_cart(e, price_disp)
-                            st.rerun()
-
-    else:
-        # 검색 전: 전체 과정명 태그 구름
-        names = sorted({e.name for e in all_courses})
-        st.markdown(
-            f"<p style='color:#64748b;font-size:.83rem;margin-bottom:.5rem'>"
-            f"총 <b style='color:#1e3a5f'>{len(names)}개</b> 과정이 등록되어 있습니다. "
-            f"과정명을 입력해 검색하세요.</p>",
-            unsafe_allow_html=True,
-        )
-        tags = ''.join(
-            f"<span style='background:#e2e8f0;border-radius:5px;"
-            f"padding:.12rem .5rem;font-size:.8rem;margin:.18rem .12rem;"
-            f"display:inline-block;color:#374151;font-weight:500'>{n}</span>"
-            for n in names
-        )
-        st.markdown(
-            f"<div style='line-height:2.4;margin-top:.2rem'>{tags}</div>",
-            unsafe_allow_html=True,
-        )
+                else:
+                    btn_key = f"add_{e.name}_{e.room}_{e.start_date}_{e.start_time}"
+                    if st.button('＋', key=btn_key, use_container_width=True,
+                                 help=f'{e.name} 장바구니에 추가'):
+                        add_to_cart(e, price)
+                        st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -772,7 +825,11 @@ with col_left:
 # ══════════════════════════════════════════════════════════════════════════════
 with col_right:
     cart = st.session_state.cart
-    st.markdown(f'### 🛒 선택 과목 &nbsp;<span style="font-size:.85rem;color:#64748b;font-weight:500">({len(cart)}개)</span>', unsafe_allow_html=True)
+    st.markdown(
+        f'### 🛒 선택 과목 &nbsp;'
+        f'<span style="font-size:.85rem;color:#64748b;font-weight:500">({len(cart)}개)</span>',
+        unsafe_allow_html=True,
+    )
 
     if not cart:
         st.markdown(
@@ -780,65 +837,61 @@ with col_right:
             "border-radius:10px;padding:2rem;text-align:center;color:#94a3b8'>"
             "<div style='font-size:2rem;margin-bottom:.5rem'>🛒</div>"
             "<div style='font-weight:600;margin-bottom:.3rem'>선택한 과목이 없어요</div>"
-            "<small>왼쪽 검색 결과에서 <b>＋ 추가</b>를 누르세요</small>"
+            "<small>왼쪽 검색 결과에서 <b>＋</b>를 누르세요</small>"
             '</div>',
             unsafe_allow_html=True,
         )
     else:
         for i, item in enumerate(cart):
-            is_wd     = item['sheet'] == '평일'
-            card_cls  = 'wd' if is_wd else 'we'
-            badge_cls = 'badge-wd' if is_wd else 'badge-we'
+            is_we     = item['sheet'] == '주말'
+            card_cls  = 'we' if is_we else ''
+            sheet_cls = 'c-sheet-we' if is_we else 'c-sheet-wd'
+            days_cls  = 'c-days-we' if is_we else 'c-days'
 
             try:
                 sd = datetime.strptime(item['start_date'], "%Y-%m-%d")
                 ed = datetime.strptime(item['end_date'],   "%Y-%m-%d")
-                if sd.month == ed.month:
-                    period_str = f"{sd.year}년 {sd.month}월 {sd.day}일 ~ {ed.day}일"
-                else:
-                    period_str = f"{sd.month}월 {sd.day}일 ~ {ed.month}월 {ed.day}일"
+                period_str = f"{sd.year}년 {sd.month}.{sd.day} ~ {ed.month}.{ed.day}"
             except Exception:
                 period_str = f"{item['start_date']} ~ {item['end_date']}"
 
-            # 가격 표시
             p = item.get('price')
             if p == -1:
-                price_html = "<span class='price-tag free' style='font-size:.75rem'>국비훈련 무료</span>"
+                price_html = "<span class='price-tag free' style='font-size:.72rem'>국비 무료</span>"
             elif isinstance(p, int) and p > 0:
-                price_html = f"<span class='price-tag' style='font-size:.78rem'>{p:,}원</span>"
+                price_html = f"<span class='price-tag' style='font-size:.74rem'>{p:,}원</span>"
             else:
-                price_html = "<span class='price-tag unknown' style='font-size:.75rem'>수강료 문의</span>"
+                price_html = "<span class='price-tag unknown' style='font-size:.72rem'>수강료 문의</span>"
 
             col_info, col_del = st.columns([6, 1])
             with col_info:
                 st.markdown(
                     f"<div class='cart-card {card_cls}'>"
-                    f"<div style='display:flex;align-items:center;gap:.4rem;margin-bottom:.2rem'>"
+                    f"<div style='display:flex;align-items:center;gap:.35rem;margin-bottom:.18rem'>"
                     f"<span class='cart-name'>{item['name']}</span>"
-                    f"<span class='badge {badge_cls}'>{item['sheet']}</span>"
+                    f"<span class='c-sheet {sheet_cls}'>{item['sheet']}</span>"
                     f"{price_html}"
                     f"</div>"
                     f"<div class='cart-meta'>"
-                    f"⏰ {item['start_time']}{'~'+item['end_time'] if item.get('end_time') else ''} &nbsp;·&nbsp; "
-                    f"📍 {item['room']} &nbsp;·&nbsp; "
-                    f"👨‍🏫 {item['instructor'] or '미정'} &nbsp;&nbsp;"
-                    f"{_days_badge_html(item.get('days',''))}<br>"
+                    f"<span class='{days_cls}'>"
+                    f"{_days_badge_row(item.get('days',''), is_we)}"
+                    f"</span> "
+                    f"⏰ {item['start_time']}{'~'+item['end_time'] if item.get('end_time') else ''}"
+                    f" &nbsp;·&nbsp; 📍 {item['room']}<br>"
                     f"<span class='cart-period'>🗓 {period_str}</span>"
                     f"</div></div>",
                     unsafe_allow_html=True,
                 )
             with col_del:
-                st.markdown("<div style='margin-top:.4rem'></div>", unsafe_allow_html=True)
+                st.markdown("<div style='margin-top:.3rem'></div>", unsafe_allow_html=True)
                 if st.button('✕', key=f'del_{i}', help='제거'):
                     st.session_state.cart.pop(i)
                     st.rerun()
 
         # ── 수강료 합계 ──────────────────────────────────────────────────────
-        known_prices = [
-            item['price'] for item in cart
-            if isinstance(item.get('price'), int) and item['price'] > 0
-        ]
-        gov_count  = sum(1 for item in cart if item.get('price') == -1)
+        known_prices  = [item['price'] for item in cart
+                         if isinstance(item.get('price'), int) and item['price'] > 0]
+        gov_count     = sum(1 for item in cart if item.get('price') == -1)
         unknown_count = len(cart) - len(known_prices) - gov_count
 
         if known_prices or gov_count:
@@ -847,11 +900,7 @@ with col_right:
                 total_str += f" + 국비 {gov_count}개"
             if unknown_count:
                 total_str += f" + 문의 {unknown_count}개"
-            note = ""
-            if gov_count:
-                note = " (국비훈련 제외)"
-            elif unknown_count:
-                note = " (문의 제외)"
+            note = " (국비 제외)" if gov_count else (" (문의 제외)" if unknown_count else "")
             st.markdown(
                 f"<div class='cart-total'>"
                 f"<span class='cart-total-label'>💰 예상 수강료 합계{note}</span>"
@@ -868,7 +917,7 @@ with col_right:
         st.markdown('---')
 
         # ── 엑셀 생성 ────────────────────────────────────────────────────────
-        st.markdown('#### 📥 시간표 생성')
+        st.markdown('#### 📥 개인 시간표 생성')
         sname = st.text_input(
             '수강생 이름',
             placeholder='홍길동',
@@ -895,6 +944,6 @@ with col_right:
 st.markdown('---')
 st.markdown(
     "<p style='text-align:center;color:#9ca3af;font-size:.78rem'>"
-    'SBS아카데미 대전지점 · 시간표 검색 시스템</p>',
+    'SBS아카데미 대전지점 · 강의 시간표 검색 시스템</p>',
     unsafe_allow_html=True,
 )

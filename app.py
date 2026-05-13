@@ -458,22 +458,29 @@ def build_html(name, contact, field, consultant, memo, df, total, subtotal, savi
 #            실제 주소는 build_excel 내부의 _make_cell_map()이 조합합니다.
 #
 CELL_MAP: dict[str, str | int] = {
-    # ── 과정 데이터 (B7~B29 = 과목명, E7~E29 = 등록비) ─────────────────────────
-    # 템플릿 SUM 범위 E7:E29 기준 / B열 = '과목명' 헤더 열
-    "과정_시작행":  7,      # 첫 번째 과정 데이터 행
-    "과정_종료행":  29,     # 마지막 과정 데이터 행 (템플릿 SUM(E7:E29) 맞춤)
-    "과정명_열":    "B",    # 과목명 입력 열 (B6 헤더 = '과목명')
-    "등록비_열":    "E",    # 수강료 입력 열
-    # ── 합계 ──────────────────────────────────────────────────────────────────
-    "합계셀":       "E31",  # 총 등록비 — 템플릿 SUM(E7:E29) 재확인
-    # ── 할인 섹션 (35~39행, A=명분, C=율 — D/E 수식은 템플릿 유지) ────────────
-    "할인_시작행":  35,
-    "명분_열":      "A",    # A35:B35 병합 → A열에 입력
-    "할인율_열":    "C",    # C35:C39 = 할인율(소수) 입력
-    # ── C40:C42 수식은 템플릿 그대로 유지 (덮어쓰지 않음) ────────────────────
-    # C40 = =E39 (총 납부 등록비)
-    # C41 = =INDEX(G53:M54,...) (온라인강의 비용 조회)
-    # C42 = =C40/28 (한 과목당 수강료)
+    # ── 과정 데이터 (B8~B30 = 과목명, F8~F30 = 수강료, D8~D30 = 과목수) ───────
+    # 템플릿 SUM 범위 D8:D30 / F8:F30 기준
+    "과정_시작행":  8,      # 첫 번째 과정 데이터 행
+    "과정_종료행":  30,     # 마지막 과정 데이터 행 (최대 23과목)
+    "과정명_열":    "B",    # 과목명 입력 열 (B7 헤더 = '과목명')
+    "등록비_열":    "F",    # 수강료 입력 열
+    "과목수_열":    "D",    # 과목수 입력 열 (D7 헤더 = 'DAY')
+    # ── 합계 행 (31행 — 수식: D31=SUM(D8:D30), F31=SUM(F8:F30)) ─────────────
+    "합계행":       31,
+    "합계_과목수":  "D",    # D31 = 과목수 합계
+    "합계_금액":    "F",    # F31 = 원수강료 합계
+    # ── 할인 섹션 (34~36행, B=명분, D=율 — E수식은 템플릿 유지) ────────────────
+    "할인_시작행":  34,
+    "명분_열":      "B",    # B34:C34 병합 → B열에 입력
+    "할인율_열":    "D",    # D34~D36 = 할인율(소수) 입력
+    # ── D37:D42 수식은 템플릿 그대로 유지 (덮어쓰지 않음) ────────────────────
+    # D37 = ROUNDUP(SUM(E34:G36),-3)  (총 할인금액)
+    # D38 = F31-D37                    (납부 수강료)
+    # D39 = SUM(D38+C31)               (총 등록금액, C31=온라인강의)
+    # D40 = SUM(D39/3)                 (3개월 할부)
+    # D41 = SUM(D39/6)                 (6개월 할부)
+    # D42 = SUM(D38/D31)               (1과목당 수강료)
+    "담당자셀":     "F5",   # F5 = 담당자 이름 (동적 입력)
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -496,61 +503,86 @@ def build_excel(
     disc_rate4: float = 0.0, disc_reason4: str = "",
     disc_rate5: float = 0.0, disc_reason5: str = "",
 ) -> bytes:
-    """패키지 견적서(고정).xlsx 템플릿을 로드해 CELL_MAP 기반으로 데이터를 기입합니다.
+    """견적서_양식.xlsx.xlsx 템플릿을 로드해 CELL_MAP 기반으로 데이터를 기입합니다.
     병합 셀·색상·폰트·테두리 등 서식을 100% 유지합니다.
-    템플릿 기존 수식(D35:E39, C40:C42)은 덮어쓰지 않습니다."""
+    템플릿 기존 수식(E34:E36, D37:D42)은 덮어쓰지 않습니다."""
 
-    TEMPLATE = ROOT / "패키지 견적서(고정).xlsx"
+    TEMPLATE = ROOT / "견적서_양식.xlsx.xlsx"
     wb = openpyxl.load_workbook(TEMPLATE)
-    ws = wb.worksheets[0]   # 시트명: 견적서
+    ws = wb.worksheets[0]
+
+    from openpyxl.cell import MergedCell as _MC
 
     cm       = CELL_MAP
-    start    = int(cm["과정_시작행"])   # 7
-    end      = int(cm["과정_종료행"])   # 29 (SUM(E7:E29) 일치)
-    col_name = cm["과정명_열"]          # B (과목명 헤더 열)
-    col_fee  = cm["등록비_열"]          # E
+    start    = int(cm["과정_시작행"])   # 8
+    end      = int(cm["과정_종료행"])   # 30 (최대 23과목)
+    col_name = cm["과정명_열"]          # B (과목명)
+    col_fee  = cm["등록비_열"]          # F (수강료)
+    col_qty  = cm["과목수_열"]          # D (과목수)
+    sum_row  = int(cm["합계행"])        # 31
 
-    # ── 0. 학생 이름 기입 (A1:E3 병합 셀 → 최상위 A1에 기입) ──────────────
-    ws["A1"] = f"{name}님 교육과정 등록금 안내"
+    COL_IDX = {"B": 2, "D": 4, "F": 6}  # 열 이름 → 인덱스
 
-    # ── 1. 과정 데이터 채우기 (최대 23과목: B7~B29 / E7~E29) ─────────────
+    def _set(col: str, row: int, val):
+        """병합셀이 아닌 경우에만 값 기입"""
+        cell = ws.cell(row=row, column=COL_IDX[col])
+        if not isinstance(cell, _MC):
+            cell.value = val
+
+    # ── 0. 학생 이름 기입 (A1:G3 병합 셀 → 최상위 A1에 기입) ──────────────
+    ws["A1"] = f"{name}님 교육과정 수강료 안내"
+
+    # ── 0.5. 담당자 기입 (F5) ──────────────────────────────────────────────
+    ws[cm["담당자셀"]] = consultant
+
+    # ── 1. 과정 데이터 채우기 (최대 23과목: B8~B30 / F8~F30 / D8~D30) ──────
     for i, (_, row) in enumerate(df.iterrows()):
         r = start + i
         if r > end:
             break
-        ws[f"{col_name}{r}"] = row["과정명"]
-        ws[f"{col_fee}{r}"]  = row["_price"]
+        _set(col_name, r, row["과정명"])
+        _set(col_fee,  r, row["_price"])
+        _set(col_qty,  r, 1)             # 과목수 = 1
 
     # 나머지 빈 행 초기화 (이전 실행 잔여 데이터 제거)
     filled = len(df)
     for r in range(start + filled, end + 1):
-        ws[f"{col_name}{r}"] = None
-        ws[f"{col_fee}{r}"]  = None
+        _set(col_name, r, None)
+        _set(col_fee,  r, None)
+        _set(col_qty,  r, None)
 
-    # ── 2. 합계 수식 (E31 = SUM(E7:E29)) — 템플릿 기존 값 재확인 ──────────
-    ws[cm["합계셀"]] = f"=SUM({col_fee}{start}:{col_fee}{end})"
+    # ── 2. 합계 수식 확인 (D31=SUM(D8:D30), F31=SUM(F8:F30)) ────────────────
+    # 템플릿에 이미 수식이 설정되어 있으므로 재확인만
+    ws[f"D{sum_row}"] = f"=SUM({col_qty}{start}:{col_qty}{end})"
+    ws[f"F{sum_row}"] = f"=SUM({col_fee}{start}:{col_fee}{end})"
 
-    # ── 3. 할인율만 기입 (C35:C39) ───────────────────────────────────────────
-    # D35:E39 수식과 C40:C42 수식은 템플릿 그대로 유지 — 덮어쓰지 않음
-    disc_rates   = [disc_rate1, disc_rate2, disc_rate3, disc_rate4, disc_rate5]
-    disc_reasons = [disc_reason1, disc_reason2, disc_reason3, disc_reason4, disc_reason5]
-    hr    = int(cm["할인_시작행"])   # 35
-    col_a = cm["명분_열"]            # A
-    col_c = cm["할인율_열"]          # C
+    # ── 3. 할인율 + 명분 기입 (D34~D36, B34~B36) ─────────────────────────────
+    # E34:E36 수식과 D37:D42 수식은 템플릿 그대로 유지 — 덮어쓰지 않음
+    # 새 양식은 할인행이 3개(①②③), disc_rate4/5는 UI 복합할인 표시용으로만 사용
+    disc_rates   = [disc_rate1, disc_rate2, disc_rate3]
+    disc_reasons = [disc_reason1, disc_reason2, disc_reason3]
+    hr    = int(cm["할인_시작행"])   # 34
+    col_b = cm["명분_열"]            # B
+    col_d = cm["할인율_열"]          # D
 
     for i, (rate, reason) in enumerate(zip(disc_rates, disc_reasons)):
-        r        = hr + i          # 35 ~ 39
+        r        = hr + i          # 34 ~ 36
         rate_dec = round(rate / 100, 4)
-        ws[f"{col_c}{r}"] = rate_dec   # 할인율(소수)만 기입
+        _set(col_d, r, rate_dec)   # 할인율(소수)만 기입
         # 할인율이 0보다 클 때만 명분 덮어쓰기 (0%인 행은 템플릿 기본 명분 유지)
         if rate > 0 and reason.strip():
-            ws[f"{col_a}{r}"] = reason
+            _set(col_b, r, reason)
 
-    # ── C40, C41, C42, D35:E39 — 템플릿 수식 그대로 유지 ────────────────────
-    # C40 = =E39  (총 납부 등록비)
-    # C41 = =INDEX(G53:M54,...) (온라인강의 비용 자동 조회)
-    # C42 = =C40/28  (한 과목당 수강료)
-    # D35:E39 = 할인금액/잔액 수식 (E31*C35, E31-D35, ...)
+    # ── E34:E36, D37:D42 — 템플릿 수식 그대로 유지 ───────────────────────────
+    # E34 = =F31*D34            (할인금액 ①)
+    # E35 = =(F31*(1-D34)*D35)  (할인금액 ②)
+    # E36 = =(F31*(1-D34)*(1-D35)*D36) (할인금액 ③)
+    # D37 = ROUNDUP(SUM(E34:G36),-3)   (총 할인금액)
+    # D38 = F31-D37                     (납부 수강료)
+    # D39 = SUM(D38+C31)                (총 등록금액, C31=온라인강의)
+    # D40 = SUM(D39/3)                  (3개월 할부)
+    # D41 = SUM(D39/6)                  (6개월 할부)
+    # D42 = SUM(D38/D31)                (1과목당 수강료)
 
     # ── 4. 열릴 때 전체 수식 재계산 강제 설정 ────────────────────────────────
     wb.calculation.calcMode = 'auto'

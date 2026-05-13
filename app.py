@@ -507,7 +507,7 @@ def build_excel(
     병합 셀·색상·폰트·테두리 등 서식을 100% 유지합니다.
     템플릿 기존 수식(E34:E36, D37:D42)은 덮어쓰지 않습니다."""
 
-    TEMPLATE = ROOT / "견적서_양식.xlsx.xlsx"
+    TEMPLATE = ROOT / "SBS_견적서_양식.xlsx"
     wb = openpyxl.load_workbook(TEMPLATE)
     ws = wb.worksheets[0]
 

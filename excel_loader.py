@@ -11,7 +11,7 @@ EXCEL_PATH = Path(__file__).parent / "수강료.xlsx"
 STATIC_COURSES: list[dict] = [
     # 자격증/OA
     {"department": "자격증/OA", "course": "모스",                   "price": 300000},
-    {"department": "자격증/OA", "course": "컴활1급",                "price": 350000},
+    {"department": "자격증/OA", "course": "컴활1급",                "price": 360000},
     {"department": "자격증/OA", "course": "컴활2급/주말",           "price": 300000},
     {"department": "자격증/OA", "course": "전산회계1급",            "price": 400000},
     {"department": "자격증/OA", "course": "전산세무2급",            "price": 400000},
@@ -27,13 +27,13 @@ STATIC_COURSES: list[dict] = [
     {"department": "아트웍", "course": "해부학",           "price": 400000},
     {"department": "아트웍", "course": "디지털드로잉1~6", "price": 500000},
     {"department": "아트웍", "course": "디드포폴1~4",     "price": 600000},
-    {"department": "아트웍", "course": "스토리보드",       "price": 500000},
-    {"department": "아트웍", "course": "AI크리에이터-아트웍", "price": 500000},
+    {"department": "아트웍", "course": "스토리보드",       "price": 800000},
+    {"department": "아트웍", "course": "AI크리에이터-아트웍", "price": 400000},
     # 시각편집
-    {"department": "시각편집", "course": "포토샵, 일러스트",     "price": 350000},
+    {"department": "시각편집", "course": "포토샵, 일러스트",     "price": 380000},
     {"department": "시각편집", "course": "포토웍스, 디일러",     "price": 400000},
     {"department": "시각편집", "course": "편집포폴1~2",          "price": 500000},
-    {"department": "시각편집", "course": "인디자인",             "price": 350000},
+    {"department": "시각편집", "course": "인디자인",             "price": 380000},
     {"department": "시각편집", "course": "인포그래픽",           "price": 400000},
     {"department": "시각편집", "course": "그래픽아트웍",         "price": 400000},
     {"department": "시각편집", "course": "AI크리에이터-시각편집","price": 500000},
